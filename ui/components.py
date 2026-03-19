@@ -140,7 +140,7 @@ def create_loot_table_tab(
             placeholder="DOMAIN\\user:RID:LMHASH:NTHASH::: or DOMAIN\\user:password",
         ).props("autogrow").classes("w-full")
         with ui.row().classes("w-full justify-end gap-2"):
-            ui.button("Cancel", on_click=import_dialog.close).props("flat")
+            ui.button("Cancel", on_click=import_dialog.close).props("flat").classes("text-white")
 
             def run_import() -> None:
                 count = on_import(import_text.value or "")
@@ -152,9 +152,9 @@ def create_loot_table_tab(
 
     with ui.row().classes("w-full gap-2"):
         ui.button("Save / Update Credential", on_click=save_row).classes("bg-red-700 text-white")
-        ui.button("Clear Form", on_click=clear_form).props("outline")
-        ui.button("Import Secrets", on_click=import_dialog.open).props("outline")
-        ui.button("Refresh", on_click=refresh_table).props("flat")
+        ui.button("Clear Form", on_click=clear_form).props("outline").classes("text-white")
+        ui.button("Import Secrets", on_click=import_dialog.open).props("outline").classes("text-white")
+        ui.button("Refresh", on_click=refresh_table).props("flat").classes("text-white")
 
     refresh_table()
     return refresh_table

