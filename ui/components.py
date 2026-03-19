@@ -21,7 +21,7 @@ def create_notes_panel(
     current_sid: list[str] = [""]
 
     node_header = ui.label("Select a node to write notes").classes(
-        "text-slate-400 text-xs italic mb-1"
+        "text-gray-100 text-xs italic mb-1"
     )
 
     def _on_change(e: events.ValueChangeEventArguments) -> None:
@@ -36,7 +36,7 @@ def create_notes_panel(
             on_change=_on_change,
         )
         .props("autogrow outlined dark")
-        .classes("w-full text-slate-100")
+        .classes("w-full text-white")
     )
 
     def update_notes_panel(sid: str, node_label: str) -> None:
@@ -63,7 +63,7 @@ def create_upload_dropzone(
         )
         .props("accept=.zip,.json")
         .classes(
-            "w-full max-w-2xl bg-zinc-900 text-slate-100 border border-zinc-700 "
+            "w-full max-w-2xl bg-zinc-900 text-white border border-zinc-700 "
             "rounded-xl p-3"
         )
     )
@@ -133,8 +133,8 @@ def create_loot_table_tab(
         ntlm_input.value = ""
         ticket_input.value = ""
 
-    with ui.dialog() as import_dialog, ui.card().classes("w-[760px] bg-zinc-900 text-slate-100"):
-        ui.label("Import Secrets (secretsdump / crackmapexec grepable)").classes("text-slate-200")
+    with ui.dialog() as import_dialog, ui.card().classes("w-[760px] bg-zinc-900 text-white"):
+        ui.label("Import Secrets (secretsdump / crackmapexec grepable)").classes("text-white")
         import_text = ui.textarea(
             "Paste output",
             placeholder="DOMAIN\\user:RID:LMHASH:NTHASH::: or DOMAIN\\user:password",

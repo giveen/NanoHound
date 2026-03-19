@@ -114,10 +114,10 @@ def _build_chart_options(
                 "draggable": True,
                 "force": {"repulsion": 110, "edgeLength": 90},
                 "categories": categories,
-                "label": {"show": True, "color": "#e2e8f0", "fontSize": 10},
+                "label": {"show": True, "color": "#ffffff", "fontSize": 10},
                 "edgeLabel": {
                     "show": True,
-                    "color": "#cbd5e1",
+                    "color": "#ffffff",
                     "fontSize": 9,
                     "formatter": "{c}",
                 },
@@ -238,7 +238,7 @@ def _graph_to_echarts_data(
                 "target": target,
                 "value": edge_label,
                 "edge_type": edge_label,
-                "label": {"show": True, "formatter": edge_label, "color": "#cbd5e1"},
+                "label": {"show": True, "formatter": edge_label, "color": "#ffffff"},
                 "lineStyle": {
                     "color": "#f43f5e" if is_live_path_edge else ("#ef4444" if is_manual_path_edge else "#334155"),
                     "width": 4 if is_live_path_edge else (2 if is_manual_path_edge else 1),
@@ -559,7 +559,7 @@ def _render_oracle_panel(
     with oracle_content_container:
         for cmd_label, cmd_text in commands:
             ui.label(cmd_label).classes(
-                "text-xs uppercase tracking-wider text-slate-400 mt-3"
+                "text-xs uppercase tracking-wider text-white mt-3"
             )
             ui.code(cmd_text, language="bash").classes("w-full whitespace-pre-wrap")
 
@@ -575,7 +575,7 @@ def _render_oracle_panel(
             (
                 ui.button("Copy", on_click=_make_copy_handler())
                 .props("flat size=sm icon=content_copy")
-                .classes("text-red-400 self-end")
+                .classes("text-red-200 self-end")
             )
 
 
@@ -873,21 +873,21 @@ def build_ui() -> None:
         """,
     )
 
-    with ui.header().classes("items-center justify-between bg-zinc-900 text-slate-100"):
+    with ui.header().classes("items-center justify-between bg-zinc-900 text-white"):
         ui.label("NanoHound").classes("text-xl font-semibold tracking-wide")
-        ui.label("Lightweight AD Attack Path Mapping").classes("text-slate-400")
+        ui.label("Lightweight AD Attack Path Mapping").classes("text-gray-100")
         ui.button(
             "Download Session",
             on_click=_download_session,
-        ).props("flat icon=download").classes("text-slate-300 ml-auto")
+        ).props("flat icon=download").classes("text-white ml-auto")
 
-    with ui.left_drawer(value=True).classes("bg-zinc-950 text-slate-200 w-72 p-4"):
-        ui.label("Attack Shortcuts").classes("text-sm uppercase tracking-wider text-slate-400")
+    with ui.left_drawer(value=True).classes("bg-zinc-950 text-white w-72 p-4"):
+        ui.label("Attack Shortcuts").classes("text-sm uppercase tracking-wider text-gray-100")
         ui.switch(
             "Auto-Calculate Path to DA",
             value=auto_calculate_path_to_da,
             on_change=lambda e: _set_auto_calculate_path(bool(e.value)),
-        ).classes("w-full text-slate-200")
+        ).classes("w-full text-white")
         ui.separator().classes("bg-zinc-800")
         (
             ui.button(
@@ -895,7 +895,7 @@ def build_ui() -> None:
                 on_click=lambda: ui.notify("Shortcut coming soon"),
             )
             .props("flat")
-            .classes("w-full justify-start text-slate-200")
+            .classes("w-full justify-start text-white")
         )
         (
             ui.button(
@@ -903,7 +903,7 @@ def build_ui() -> None:
                 on_click=lambda: ui.notify("Shortcut coming soon"),
             )
             .props("flat")
-            .classes("w-full justify-start text-slate-200")
+            .classes("w-full justify-start text-white")
         )
         (
             ui.button(
@@ -927,7 +927,7 @@ def build_ui() -> None:
                 on_click=lambda: _set_filter("all"),
             )
             .props("flat")
-            .classes("w-full justify-start text-slate-200")
+            .classes("w-full justify-start text-white")
         )
         (
             ui.button(
@@ -969,31 +969,31 @@ def build_ui() -> None:
                 ),
             )
             .props("outline")
-            .classes("w-full mt-2 border-zinc-700 text-slate-200")
+            .classes("w-full mt-2 border-zinc-700 text-white")
         )
 
-    with ui.right_drawer(value=True).classes("bg-zinc-950 text-slate-200 w-96 p-4"):
+    with ui.right_drawer(value=True).classes("bg-zinc-950 text-white w-96 p-4"):
         with ui.tabs().classes("w-full") as right_tabs:
             right_oracle_tab = ui.tab("Oracle", icon="bolt")
             right_notes_tab = ui.tab("Notes", icon="description")
         with ui.tab_panels(right_tabs, value=right_oracle_tab).classes("w-full"):
             with ui.tab_panel(right_oracle_tab):
                 ui.label("Command Oracle").classes(
-                    "text-sm uppercase tracking-wider text-slate-400"
+                    "text-sm uppercase tracking-wider text-gray-100"
                 )
                 ui.separator().classes("bg-zinc-800")
                 edge_selection_label = ui.label(
                     "Click an edge or kerberoastable node"
-                ).classes("text-slate-400 text-xs italic pb-1")
+                ).classes("text-gray-100 text-xs italic pb-1")
                 with ui.card().classes("w-full bg-zinc-900/70 border border-zinc-800 p-2 mb-2"):
                     ui.label("Selected Node Details").classes(
-                        "text-xs uppercase tracking-wider text-slate-400"
+                        "text-xs uppercase tracking-wider text-gray-100"
                     )
                     selected_node_title = ui.label("No node selected").classes(
-                        "text-slate-200 text-sm"
+                        "text-white text-sm"
                     )
                     selected_node_meta = ui.label("Click a graph node to inspect it").classes(
-                        "text-slate-400 text-xs"
+                        "text-gray-100 text-xs"
                     )
 
                     # Inline notes editor for the selected node.
@@ -1071,7 +1071,7 @@ def build_ui() -> None:
         with ui.expansion("Control Panel", icon="tune").props("default-opened")\
             .classes("w-full bg-zinc-900/80 border border-zinc-800 rounded-lg nanohound-card"):
             with ui.card().classes("w-full bg-transparent border-0 shadow-none"):
-                status_label = ui.label("Awaiting SharpHound upload...").classes("text-slate-300")
+                status_label = ui.label("Awaiting SharpHound upload...").classes("text-white")
                 create_upload_dropzone(handle_upload)
                 create_search_bar(on_find_path)
                 with ui.row().classes("w-full items-end gap-2 mt-2"):
@@ -1098,10 +1098,10 @@ def build_ui() -> None:
                             on_click=lambda: _set_owned_by_query(owned_query_input.value or "", False),
                         )
                         .props("outline")
-                        .classes("border-zinc-600 text-slate-300")
+                        .classes("border-zinc-600 text-white")
                     )
                 suggestion_hint = ui.label("Start typing to see matching users/objects").classes(
-                    "text-xs text-slate-400"
+                    "text-xs text-white"
                 )
                 suggestion_list = ui.column().classes("w-full gap-1")
 
@@ -1133,7 +1133,7 @@ def build_ui() -> None:
                                 )
                                 .props("flat dense")
                                 .classes(
-                                    "w-full justify-start text-left text-slate-200 "
+                                    "w-full justify-start text-left text-white "
                                     "hover:bg-zinc-800 rounded"
                                 )
                             )
@@ -1151,13 +1151,13 @@ def build_ui() -> None:
                 with ui.expansion("Graph Canvas", icon="hub").props("default-opened")\
                     .classes("w-full bg-zinc-900/80 border border-zinc-800 rounded-lg"):
                     with ui.card().classes("w-full bg-transparent border-0 shadow-none"):
-                        ui.label("Graph View").classes("text-slate-300")
+                        ui.label("Graph View").classes("text-white")
                         chart_placeholder = ui.echart(_build_chart_options()).classes("w-full h-[70vh]")
                         chart_placeholder.on("click", _on_graph_click)
 
             with ui.tab_panel(loot_tab):
                 with ui.card().classes("w-full bg-zinc-900/80 border border-zinc-800"):
-                    ui.label("Loot Table").classes("text-slate-300")
+                    ui.label("Loot Table").classes("text-white")
                     loot_refresh_callback = create_loot_table_tab(
                         on_upsert=_upsert_loot,
                         on_import=_import_loot,

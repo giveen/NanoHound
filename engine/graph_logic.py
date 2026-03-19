@@ -173,18 +173,56 @@ class NanoGraphEngine:
                         weight=self.EDGE_WEIGHT_MAP["MemberOf"],
                     )
 
+    def _normalize_object_name(self, name: str) -> str:
+        r"""Extract the clean RDN (relative distinguished name) from an AD object name.
+        
+        Handles formats like:
+        - DOMAIN ADMINS
+        - DOMAIN ADMINS@FOREST.LOCAL
+        - DOMAIN\DOMAIN ADMINS
+        - CN=Domain Admins,OU=...
+        """
+        name = name.strip()
+        
+        # Remove leading DOMAIN\ or FOREST\ prefixes
+        if "\\" in name:
+            name = name.split("\\", maxsplit=1)[-1].strip()
+        
+        # Remove trailing @domain suffix
+        if "@" in name:
+            name = name.split("@", maxsplit=1)[0].strip()
+        
+        # Handle CN= LDAP format
+        if name.upper().startswith("CN="):
+            name = name[3:].split(",", maxsplit=1)[0].strip()
+        
+        return name.casefold()
+
     def _is_target_group(self, node_id: str, target_group: str) -> bool:
+        """Match a node against a target group name, handling various AD naming formats."""
         attrs = self.graph.nodes[node_id]
         if str(attrs.get("type", "")).casefold() != "group":
             return False
 
-        needle = target_group.strip().casefold()
-        if not needle:
+        target_normalized = self._normalize_object_name(target_group)
+        if not target_normalized:
             return False
 
-        node_name = str(attrs.get("name", "")).casefold()
-        node_base = node_name.split("@", maxsplit=1)[0].strip()
-        return needle in {node_name, node_base} or needle in node_name
+        node_name = str(attrs.get("name", ""))
+        node_normalized = self._normalize_object_name(node_name)
+        
+        # Direct match after normalization
+        if node_normalized == target_normalized:
+            return True
+        
+        # For "DOMAIN ADMINS", also match substring (e.g., contains "domain admin")
+        # This helps catch variations like "DOMAIN ADMINS@..." or "DOMAIN\DOMAIN ADMINS"
+        target_parts = target_normalized.split()
+        if len(target_parts) > 0:
+            # Check if all significant words are in the normalized node name
+            return all(part in node_normalized for part in target_parts)
+        
+        return False
 
     def get_shortest_path_from_owned(self, target_group: str = "DOMAIN ADMINS") -> list[str] | None:
         """Return the easiest weighted path from any owned node to a target group.
