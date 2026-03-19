@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import networkx as nx
 from nicegui import events, ui
 
 from engine.commands import CommandOracle
@@ -39,11 +40,13 @@ edge_selection_label = None
 oracle_content_container = None
 selected_edge_command = ""
 update_notes_panel_callback: Callable[[str, str], None] | None = None
+update_selected_node_panel_callback: Callable[[str], None] | None = None
 selected_node_id = ""
 selected_node_label = ""
 highlighted_manual_path: list[str] = []
 highlighted_live_path: list[str] = []
 auto_calculate_path_to_da = True
+focused_owned_node_id = ""
 
 NODE_TYPE_COLORS = {
     "user": "#22c55e",
@@ -69,6 +72,11 @@ def _build_chart_options(
     max_nodes = 3000
     selected_filter = filter_mode or active_filter
     included = _resolve_filtered_nodes(selected_filter)
+    if focused_owned_node_id and focused_owned_node_id in graph_engine.graph:
+        focus_nodes = _owned_focus_neighborhood(focused_owned_node_id)
+        included = (included & focus_nodes) if selected_filter != "all" else focus_nodes
+        included.add(focused_owned_node_id)
+
     graph_nodes = [
         (node_id, attrs)
         for node_id, attrs in graph_engine.graph.nodes(data=True)
@@ -191,6 +199,13 @@ def _graph_to_echarts_data(
             shadow_blur = max(shadow_blur, 20)
             shadow_color = "rgba(34, 197, 94, 0.80)"
 
+        # Focused owned node gets extra emphasis.
+        if node_id == focused_owned_node_id:
+            border_color = "#06b6d4"
+            border_width = max(border_width, 5)
+            shadow_blur = max(shadow_blur, 28)
+            shadow_color = "rgba(6, 182, 212, 0.95)"
+
         nodes.append(
             {
                 "id": node_id,
@@ -260,6 +275,45 @@ def _member_of_neighbors(node_ids: Iterable[str]) -> set[str]:
     return neighbors
 
 
+def _owned_focus_neighborhood(node_id: str, max_out_hops: int = 2) -> set[str]:
+    """Return a compact neighborhood around an owned node for visual focus.
+
+    Includes:
+    - outbound directed reachability up to ``max_out_hops``
+    - immediate inbound neighbors for context
+    """
+    if node_id not in graph_engine.graph:
+        return set()
+
+    try:
+        outward = set(
+            nx.single_source_shortest_path_length(
+                graph_engine.graph,
+                node_id,
+                cutoff=max_out_hops,
+            ).keys()
+        )
+    except nx.NetworkXError:
+        outward = {node_id}
+
+    inbound = {
+        src
+        for src, dst in graph_engine.graph.in_edges(node_id)
+        if dst == node_id
+    }
+    return outward | inbound | {node_id}
+
+
+def _set_owned_focus(node_id: str | None) -> None:
+    """Activate focus mode around an owned node (or clear when None)."""
+    global focused_owned_node_id
+    focused_owned_node_id = node_id or ""
+
+
+def _clear_owned_focus() -> None:
+    _set_owned_focus(None)
+
+
 def _resolve_filtered_nodes(filter_mode: str) -> set[str]:
     """Return visible nodes based on current quick-filter selection."""
     all_nodes = {node_id for node_id, _ in graph_engine.graph.nodes(data=True)}
@@ -299,27 +353,57 @@ def _find_matching_nodes(query: str) -> list[tuple[str, str]]:
     if not needle:
         return []
 
-    matches: list[tuple[str, str]] = []
+    starts_with: list[tuple[str, str]] = []
+    contains: list[tuple[str, str]] = []
     for node_id, attrs in graph_engine.graph.nodes(data=True):
         node_name = str(attrs.get("name", ""))
-        if needle in str(node_id).casefold() or needle in node_name.casefold():
-            matches.append((str(node_id), node_name or str(node_id)))
+        entry = (str(node_id), node_name or str(node_id))
+        node_id_l = str(node_id).casefold()
+        node_name_l = node_name.casefold()
+        if node_id_l.startswith(needle) or node_name_l.startswith(needle):
+            starts_with.append(entry)
+        elif needle in node_id_l or needle in node_name_l:
+            contains.append(entry)
 
-    matches.sort(key=lambda row: row[1].casefold())
-    return matches
+    starts_with.sort(key=lambda row: row[1].casefold())
+    contains.sort(key=lambda row: row[1].casefold())
+    return starts_with + contains
+
+
+def _autocomplete_candidates(query: str, limit: int = 10) -> list[tuple[str, str]]:
+    """Return quick search suggestions prioritized for user objects."""
+    ranked_matches = _find_matching_nodes(query)
+    if not ranked_matches:
+        return []
+
+    users: list[tuple[str, str]] = []
+    non_users: list[tuple[str, str]] = []
+    for node_id, label in ranked_matches:
+        node_type = str(graph_engine.graph.nodes.get(node_id, {}).get("type", ""))
+        if node_type == "user":
+            users.append((node_id, label))
+        else:
+            non_users.append((node_id, label))
+
+    return (users + non_users)[:limit]
 
 
 def _find_object(query: str) -> None:
     """Highlight the first matching node in the graph by SID/name."""
+    global selected_node_id, selected_node_label
     matches = _find_matching_nodes(query)
     if not matches:
         ui.notify("No matching objects found", color="warning")
         return
 
     node_id, node_name = matches[0]
+    selected_node_id = node_id
+    selected_node_label = node_name
     _refresh_chart(manual_path=[node_id])
     if update_notes_panel_callback:
         update_notes_panel_callback(node_id, node_name)
+    if update_selected_node_panel_callback:
+        update_selected_node_panel_callback(node_id)
 
     if len(matches) == 1:
         _set_status(f"Found object: {node_name}")
@@ -337,6 +421,11 @@ def _set_owned_by_query(query: str, owned: bool) -> None:
 
     for node_id, _ in matches:
         graph_engine.graph.nodes[node_id]["is_owned"] = owned
+
+    if owned:
+        _set_owned_focus(matches[0][0])
+    elif focused_owned_node_id in {node_id for node_id, _ in matches}:
+        _clear_owned_focus()
 
     _refresh_chart(manual_path=[matches[0][0]])
     _recalculate_live_path(notify_when_missing=True)
@@ -537,8 +626,11 @@ def _mark_selected_node_owned() -> None:
         return
 
     graph_engine.graph.nodes[selected_node_id]["is_owned"] = True
+    _set_owned_focus(selected_node_id)
     _refresh_chart(manual_path=[selected_node_id])
     _recalculate_live_path(notify_when_missing=True)
+    if update_selected_node_panel_callback:
+        update_selected_node_panel_callback(selected_node_id)
     _set_status(f"Marked owned: {selected_node_label or selected_node_id}")
     ui.notify("Node marked as owned", color="positive")
 
@@ -570,6 +662,8 @@ def _add_loot_for_selected_node(password: str, ntlm_hash: str) -> None:
         loot_refresh_callback()
     _refresh_chart(manual_path=[selected_node_id])
     _recalculate_live_path(notify_when_missing=True)
+    if update_selected_node_panel_callback:
+        update_selected_node_panel_callback(selected_node_id)
     _set_status(f"Added loot for: {selected_node_label or selected_node_id}")
     ui.notify("Loot added for selected node", color="positive")
 
@@ -609,6 +703,10 @@ def _on_graph_click(event: events.GenericEventArguments) -> None:
         node_name = str(node_attrs.get("name", node_id))
         selected_node_id = node_id
         selected_node_label = node_name
+        if bool(node_attrs.get("is_owned")):
+            _set_owned_focus(node_id)
+        if update_selected_node_panel_callback:
+            update_selected_node_panel_callback(node_id)
         node_ctx = _node_context(node_id)
         commands = []
 
@@ -752,6 +850,7 @@ def build_ui() -> None:
     """Construct the NanoHound dark-mode interface."""
     global chart_placeholder, status_label, loot_refresh_callback
     global edge_selection_label, oracle_content_container, update_notes_panel_callback
+    global update_selected_node_panel_callback
 
     ui.colors(
         primary="#27272a",
@@ -838,6 +937,14 @@ def build_ui() -> None:
             .props("outline")
             .classes("w-full mt-2 border-green-600 text-green-300")
         )
+        (
+            ui.button(
+                "Clear Owned Focus",
+                on_click=lambda: (_clear_owned_focus(), _refresh_chart(), _set_status("Owned focus cleared")),
+            )
+            .props("outline")
+            .classes("w-full mt-2 border-cyan-700 text-cyan-300")
+        )
         ui.separator().classes("bg-zinc-800 mt-2")
         (
             ui.button(
@@ -855,6 +962,7 @@ def build_ui() -> None:
                     graph_engine.clear(),
                     highlighted_manual_path.clear(),
                     highlighted_live_path.clear(),
+                    _clear_owned_focus(),
                     _set_filter("all"),
                     _refresh_chart(),
                     _set_status("Graph reset"),
@@ -878,31 +986,80 @@ def build_ui() -> None:
                     "Click an edge or kerberoastable node"
                 ).classes("text-slate-400 text-xs italic pb-1")
                 with ui.card().classes("w-full bg-zinc-900/70 border border-zinc-800 p-2 mb-2"):
-                    ui.label("Selected Node Actions").classes(
+                    ui.label("Selected Node Details").classes(
                         "text-xs uppercase tracking-wider text-slate-400"
                     )
-                    (
-                        ui.button("Mark Selected Owned", on_click=_mark_selected_node_owned)
-                        .props("outline icon=check_circle")
-                        .classes("w-full border-green-600 text-green-300 mt-1")
+                    selected_node_title = ui.label("No node selected").classes(
+                        "text-slate-200 text-sm"
                     )
-                    with ui.row().classes("w-full gap-2 mt-2"):
-                        quick_pwd_input = ui.input("Password").props("type=password").classes("w-full")
-                        quick_hash_input = ui.input("NTLM hash").classes("w-full")
+                    selected_node_meta = ui.label("Click a graph node to inspect it").classes(
+                        "text-slate-400 text-xs"
+                    )
 
-                    def _quick_add_loot() -> None:
-                        _add_loot_for_selected_node(
-                            quick_pwd_input.value or "",
-                            quick_hash_input.value or "",
+                    # Inline notes editor for the selected node.
+                    selected_node_notes = (
+                        ui.textarea(
+                            "Notes",
+                            placeholder="Add node-specific notes here...",
                         )
-                        quick_pwd_input.value = ""
-                        quick_hash_input.value = ""
-
-                    (
-                        ui.button("Add Loot To Selected", on_click=_quick_add_loot)
-                        .props("outline icon=key")
-                        .classes("w-full border-yellow-600 text-yellow-300 mt-1")
+                        .props("autogrow outlined dark")
+                        .classes("w-full mt-2")
                     )
+
+                    def _save_selected_node_note(e: events.ValueChangeEventArguments) -> None:
+                        if selected_node_id:
+                            notes_store.set_note(selected_node_id, e.value or "")
+                            _refresh_chart(manual_path=[selected_node_id])
+
+                    selected_node_notes.on_value_change(_save_selected_node_note)
+
+                    with ui.row().classes("w-full gap-2 mt-2"):
+                        selected_node_pwd = ui.input("Password").props("type=password").classes("w-full")
+                        selected_node_hash = ui.input("NTLM hash").classes("w-full")
+
+                    def _quick_add_loot_from_details() -> None:
+                        _add_loot_for_selected_node(
+                            selected_node_pwd.value or "",
+                            selected_node_hash.value or "",
+                        )
+                        selected_node_pwd.value = ""
+                        selected_node_hash.value = ""
+
+                    with ui.row().classes("w-full gap-2 mt-2"):
+                        (
+                            ui.button("Mark Selected Owned", on_click=_mark_selected_node_owned)
+                            .props("outline icon=check_circle")
+                            .classes("w-full border-green-600 text-green-300")
+                        )
+                        (
+                            ui.button("Add Loot", on_click=_quick_add_loot_from_details)
+                            .props("outline icon=key")
+                            .classes("w-full border-yellow-600 text-yellow-300")
+                        )
+
+                    def _update_selected_node_panel(node_id: str) -> None:
+                        if node_id not in graph_engine.graph:
+                            selected_node_title.text = "No node selected"
+                            selected_node_meta.text = "Click a graph node to inspect it"
+                            selected_node_notes.value = ""
+                            return
+
+                        attrs = graph_engine.graph.nodes[node_id]
+                        node_name = str(attrs.get("name") or node_id)
+                        node_type = str(attrs.get("type", "entity")).upper()
+                        owned = "yes" if bool(attrs.get("is_owned")) else "no"
+                        has_note = "yes" if notes_store.has_note(node_id) else "no"
+                        principal, domain, username = _parse_identity_parts(node_id)
+                        cred = loot_manager.get_credential(node_id) or loot_manager.get_credential(principal)
+                        has_loot = "yes" if cred else "no"
+                        selected_node_title.text = node_name
+                        selected_node_meta.text = (
+                            f"SID: {node_id} | Type: {node_type} | Domain: {domain or '-'} | "
+                            f"User: {username or '-'} | Owned: {owned} | Loot: {has_loot} | Notes: {has_note}"
+                        )
+                        selected_node_notes.value = notes_store.get_note(node_id)
+
+                    update_selected_node_panel_callback = _update_selected_node_panel
                 oracle_content_container = ui.column().classes("w-full gap-1")
             with ui.tab_panel(right_notes_tab):
                 update_notes_panel_callback = create_notes_panel(
@@ -911,35 +1068,78 @@ def build_ui() -> None:
                 )
 
     with ui.column().classes("w-full p-6 gap-4"):
-        with ui.card().classes("w-full bg-zinc-900/80 border border-zinc-800 nanohound-card"):
-            status_label = ui.label("Awaiting SharpHound upload...").classes("text-slate-300")
-            create_upload_dropzone(handle_upload)
-            create_search_bar(on_find_path)
-            with ui.row().classes("w-full items-end gap-2 mt-2"):
-                owned_query_input = ui.input("Find object (SID or Name)").classes("w-full")
-                (
-                    ui.button(
-                        "Find",
-                        on_click=lambda: _find_object(owned_query_input.value or ""),
+        with ui.expansion("Control Panel", icon="tune").props("default-opened")\
+            .classes("w-full bg-zinc-900/80 border border-zinc-800 rounded-lg nanohound-card"):
+            with ui.card().classes("w-full bg-transparent border-0 shadow-none"):
+                status_label = ui.label("Awaiting SharpHound upload...").classes("text-slate-300")
+                create_upload_dropzone(handle_upload)
+                create_search_bar(on_find_path)
+                with ui.row().classes("w-full items-end gap-2 mt-2"):
+                    owned_query_input = ui.input("Find object (SID or Name)").classes("w-full")
+                    (
+                        ui.button(
+                            "Find",
+                            on_click=lambda: _find_object(owned_query_input.value or ""),
+                        )
+                        .props("outline")
+                        .classes("border-cyan-600 text-cyan-300")
                     )
-                    .props("outline")
-                    .classes("border-cyan-600 text-cyan-300")
+                    (
+                        ui.button(
+                            "Mark Owned",
+                            on_click=lambda: _set_owned_by_query(owned_query_input.value or "", True),
+                        )
+                        .props("outline")
+                        .classes("border-green-600 text-green-300")
+                    )
+                    (
+                        ui.button(
+                            "Unmark",
+                            on_click=lambda: _set_owned_by_query(owned_query_input.value or "", False),
+                        )
+                        .props("outline")
+                        .classes("border-zinc-600 text-slate-300")
+                    )
+                suggestion_hint = ui.label("Start typing to see matching users/objects").classes(
+                    "text-xs text-slate-400"
                 )
-                (
-                    ui.button(
-                        "Mark Owned",
-                        on_click=lambda: _set_owned_by_query(owned_query_input.value or "", True),
-                    )
-                    .props("outline")
-                    .classes("border-green-600 text-green-300")
-                )
-                (
-                    ui.button(
-                        "Unmark",
-                        on_click=lambda: _set_owned_by_query(owned_query_input.value or "", False),
-                    )
-                    .props("outline")
-                    .classes("border-zinc-600 text-slate-300")
+                suggestion_list = ui.column().classes("w-full gap-1")
+
+                def _refresh_owned_search_suggestions(query: str) -> None:
+                    suggestion_list.clear()
+                    candidates = _autocomplete_candidates(query)
+                    if not query.strip():
+                        suggestion_hint.text = "Start typing to see matching users/objects"
+                        return
+                    if not candidates:
+                        suggestion_hint.text = "No matches"
+                        return
+
+                    suggestion_hint.text = f"{len(candidates)} suggestion(s)"
+                    with suggestion_list:
+                        for node_id, label in candidates:
+                            node_type = str(
+                                graph_engine.graph.nodes.get(node_id, {}).get("type", "entity")
+                            )
+
+                            def _fill_and_focus(entry: str = label) -> None:
+                                owned_query_input.value = entry
+                                _find_object(entry)
+
+                            (
+                                ui.button(
+                                    f"{label} [{node_type}]",
+                                    on_click=_fill_and_focus,
+                                )
+                                .props("flat dense")
+                                .classes(
+                                    "w-full justify-start text-left text-slate-200 "
+                                    "hover:bg-zinc-800 rounded"
+                                )
+                            )
+
+                owned_query_input.on_value_change(
+                    lambda e: _refresh_owned_search_suggestions(e.value or "")
                 )
 
         with ui.tabs().classes("w-full") as tabs:
@@ -948,10 +1148,12 @@ def build_ui() -> None:
 
         with ui.tab_panels(tabs, value=graph_tab).classes("w-full"):
             with ui.tab_panel(graph_tab):
-                with ui.card().classes("w-full grow min-h-[520px] bg-zinc-900/80 border border-zinc-800"):
-                    ui.label("Graph View").classes("text-slate-300")
-                    chart_placeholder = ui.echart(_build_chart_options()).classes("w-full h-[70vh]")
-                    chart_placeholder.on("click", _on_graph_click)
+                with ui.expansion("Graph Canvas", icon="hub").props("default-opened")\
+                    .classes("w-full bg-zinc-900/80 border border-zinc-800 rounded-lg"):
+                    with ui.card().classes("w-full bg-transparent border-0 shadow-none"):
+                        ui.label("Graph View").classes("text-slate-300")
+                        chart_placeholder = ui.echart(_build_chart_options()).classes("w-full h-[70vh]")
+                        chart_placeholder.on("click", _on_graph_click)
 
             with ui.tab_panel(loot_tab):
                 with ui.card().classes("w-full bg-zinc-900/80 border border-zinc-800"):
