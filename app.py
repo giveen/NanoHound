@@ -39,6 +39,11 @@ edge_selection_label = None
 oracle_content_container = None
 selected_edge_command = ""
 update_notes_panel_callback: Callable[[str, str], None] | None = None
+selected_node_id = ""
+selected_node_label = ""
+highlighted_manual_path: list[str] = []
+highlighted_live_path: list[str] = []
+auto_calculate_path_to_da = True
 
 NODE_TYPE_COLORS = {
     "user": "#22c55e",
@@ -55,7 +60,11 @@ async def _persist_uploaded_file(event: events.UploadEventArguments) -> Path:
         return Path(tmp.name)
 
 
-def _build_chart_options(path: list[str] | None = None, filter_mode: str | None = None) -> dict[str, Any]:
+def _build_chart_options(
+    manual_path: list[str] | None = None,
+    live_path: list[str] | None = None,
+    filter_mode: str | None = None,
+) -> dict[str, Any]:
     """Create ECharts graph options from the in-memory NetworkX graph."""
     max_nodes = 3000
     selected_filter = filter_mode or active_filter
@@ -66,14 +75,16 @@ def _build_chart_options(path: list[str] | None = None, filter_mode: str | None 
         if node_id in included
     ][:max_nodes]
     included = {node_id for node_id, _ in graph_nodes}
-    highlighted_nodes = set(path or [])
-    highlighted_edges = set(zip(path or [], (path or [])[1:]))
+    highlighted_nodes = set((manual_path or []) + (live_path or []))
+    highlighted_manual_edges = set(zip(manual_path or [], (manual_path or [])[1:]))
+    highlighted_live_edges = set(zip(live_path or [], (live_path or [])[1:]))
 
     nodes, links = _graph_to_echarts_data(
         graph_nodes=graph_nodes,
         included_nodes=included,
         highlighted_nodes=highlighted_nodes,
-        highlighted_edges=highlighted_edges,
+        highlighted_manual_edges=highlighted_manual_edges,
+        highlighted_live_edges=highlighted_live_edges,
     )
 
     categories = [
@@ -114,7 +125,8 @@ def _graph_to_echarts_data(
     graph_nodes: list[tuple[str, dict[str, Any]]],
     included_nodes: set[str],
     highlighted_nodes: set[str],
-    highlighted_edges: set[tuple[str, str]],
+    highlighted_manual_edges: set[tuple[str, str]],
+    highlighted_live_edges: set[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Convert NetworkX nodes and edges into ECharts graph JSON data."""
 
@@ -171,6 +183,14 @@ def _graph_to_echarts_data(
                 border_color = "#6366f1"
                 border_width = 2
 
+        # Owned-object visual feedback: green border + check icon.
+        if bool(attrs.get("is_owned")):
+            display_name = f"\u2705 {display_name}"
+            border_color = "#22c55e"
+            border_width = max(border_width, 4)
+            shadow_blur = max(shadow_blur, 20)
+            shadow_color = "rgba(34, 197, 94, 0.80)"
+
         nodes.append(
             {
                 "id": node_id,
@@ -195,7 +215,8 @@ def _graph_to_echarts_data(
             continue
 
         edge_label = str(attrs.get("raw_right") or attrs.get("relationship") or "")
-        is_path_edge = (source, target) in highlighted_edges
+        is_live_path_edge = (source, target) in highlighted_live_edges
+        is_manual_path_edge = (source, target) in highlighted_manual_edges
         links.append(
             {
                 "source": source,
@@ -204,9 +225,17 @@ def _graph_to_echarts_data(
                 "edge_type": edge_label,
                 "label": {"show": True, "formatter": edge_label, "color": "#cbd5e1"},
                 "lineStyle": {
-                    "color": "#ef4444" if is_path_edge else "#334155",
-                    "width": 2 if is_path_edge else 1,
+                    "color": "#f43f5e" if is_live_path_edge else ("#ef4444" if is_manual_path_edge else "#334155"),
+                    "width": 4 if is_live_path_edge else (2 if is_manual_path_edge else 1),
                     "opacity": 0.95,
+                    "type": "dashed" if is_live_path_edge else "solid",
+                },
+                "effect": {
+                    "show": is_live_path_edge,
+                    "period": 4,
+                    "trailLength": 0.25,
+                    "symbolSize": 5,
+                    "color": "#fb7185",
                 },
             }
         )
@@ -253,16 +282,109 @@ def _resolve_filtered_nodes(filter_mode: str) -> set[str]:
         }
         return _member_of_neighbors(principals)
 
+    if filter_mode == "owned":
+        principals = {
+            node_id
+            for node_id, attrs in graph_engine.graph.nodes(data=True)
+            if bool(attrs.get("is_owned"))
+        }
+        return _member_of_neighbors(principals)
+
     return all_nodes
 
 
-def _refresh_chart(path: list[str] | None = None) -> None:
+def _find_matching_nodes(query: str) -> list[tuple[str, str]]:
+    """Return (node_id, display_name) tuples matching a SID/name query."""
+    needle = query.strip().casefold()
+    if not needle:
+        return []
+
+    matches: list[tuple[str, str]] = []
+    for node_id, attrs in graph_engine.graph.nodes(data=True):
+        node_name = str(attrs.get("name", ""))
+        if needle in str(node_id).casefold() or needle in node_name.casefold():
+            matches.append((str(node_id), node_name or str(node_id)))
+
+    matches.sort(key=lambda row: row[1].casefold())
+    return matches
+
+
+def _find_object(query: str) -> None:
+    """Highlight the first matching node in the graph by SID/name."""
+    matches = _find_matching_nodes(query)
+    if not matches:
+        ui.notify("No matching objects found", color="warning")
+        return
+
+    node_id, node_name = matches[0]
+    _refresh_chart(manual_path=[node_id])
+    if update_notes_panel_callback:
+        update_notes_panel_callback(node_id, node_name)
+
+    if len(matches) == 1:
+        _set_status(f"Found object: {node_name}")
+    else:
+        _set_status(f"Found {len(matches)} matches, focused first: {node_name}")
+    ui.notify(f"Matched {len(matches)} object(s)", color="info")
+
+
+def _set_owned_by_query(query: str, owned: bool) -> None:
+    """Set ownership status for every node matching a SID/name query."""
+    matches = _find_matching_nodes(query)
+    if not matches:
+        ui.notify("No matching objects found", color="warning")
+        return
+
+    for node_id, _ in matches:
+        graph_engine.graph.nodes[node_id]["is_owned"] = owned
+
+    _refresh_chart(manual_path=[matches[0][0]])
+    _recalculate_live_path(notify_when_missing=True)
+    state_label = "owned" if owned else "not owned"
+    _set_status(f"Marked {len(matches)} object(s) as {state_label}")
+    ui.notify(f"Updated {len(matches)} object(s)", color="positive")
+
+
+def _refresh_chart(
+    manual_path: list[str] | None = None,
+    live_path: list[str] | None = None,
+) -> None:
     if chart_placeholder is None:
         return
 
+    active_manual_path = manual_path if manual_path is not None else highlighted_manual_path
+    active_live_path = live_path if live_path is not None else highlighted_live_path
+
     chart_placeholder.run_chart_method(
-        "setOption", _build_chart_options(path, filter_mode=active_filter)
+        "setOption",
+        _build_chart_options(
+            manual_path=active_manual_path,
+            live_path=active_live_path,
+            filter_mode=active_filter,
+        ),
     )
+
+
+def _recalculate_live_path(notify_when_missing: bool = False) -> None:
+    """Recompute and redraw the weighted path from owned beachheads to DA."""
+    global highlighted_live_path
+
+    if not auto_calculate_path_to_da:
+        highlighted_live_path = []
+        _refresh_chart()
+        return
+
+    path = graph_engine.get_shortest_path_from_owned("DOMAIN ADMINS")
+    if path:
+        highlighted_live_path = path
+        _refresh_chart()
+        _set_status("Live path to DA updated")
+        return
+
+    highlighted_live_path = []
+    _refresh_chart()
+    if notify_when_missing:
+        _set_status("No viable attack path to DA found from current beachheads.")
 
 
 def _set_filter(mode: str) -> None:
@@ -277,7 +399,22 @@ def _set_filter(mode: str) -> None:
     if mode == "asrep_roastable":
         _set_status("Filter: AS-REP roastable users + immediate groups")
         return
+    if mode == "owned":
+        _set_status("Filter: Owned objects + immediate groups")
+        return
     _set_status("Filter cleared")
+
+
+def _set_auto_calculate_path(value: bool) -> None:
+    """Enable/disable reactive DA path calculation."""
+    global auto_calculate_path_to_da, highlighted_live_path
+    auto_calculate_path_to_da = bool(value)
+    if auto_calculate_path_to_da:
+        _recalculate_live_path(notify_when_missing=True)
+    else:
+        highlighted_live_path = []
+        _set_status("Auto-Calculate Path to DA disabled")
+        _refresh_chart(live_path=[])
 
 
 def _sync_local_loot() -> None:
@@ -302,6 +439,7 @@ def _sync_local_loot() -> None:
 
     if imported:
         _refresh_chart()
+        _recalculate_live_path(notify_when_missing=True)
         if loot_refresh_callback:
             loot_refresh_callback()
         _set_status(f"Synced {imported} credential entries from local files")
@@ -375,8 +513,70 @@ def _node_context(node_id: str) -> dict[str, str]:
     }
 
 
+def _parse_identity_parts(node_id: str) -> tuple[str, str, str]:
+    """Infer principal/domain/username from a graph node."""
+    attrs = graph_engine.graph.nodes[node_id] if node_id in graph_engine.graph else {}
+    node_name = str(attrs.get("name") or node_id)
+    domain = str(attrs.get("domain") or _extract_domain(node_name))
+
+    username = node_name
+    if "@" in node_name:
+        username = node_name.split("@", maxsplit=1)[0]
+    elif "\\" in node_name:
+        username = node_name.split("\\", maxsplit=1)[1]
+
+    principal = f"{domain}\\{username}".strip("\\") if domain else username
+    return principal, domain, username
+
+
+def _mark_selected_node_owned() -> None:
+    """Mark the current node selection as owned."""
+    global selected_node_id
+    if not selected_node_id or selected_node_id not in graph_engine.graph:
+        ui.notify("Select a node first", color="warning")
+        return
+
+    graph_engine.graph.nodes[selected_node_id]["is_owned"] = True
+    _refresh_chart(manual_path=[selected_node_id])
+    _recalculate_live_path(notify_when_missing=True)
+    _set_status(f"Marked owned: {selected_node_label or selected_node_id}")
+    ui.notify("Node marked as owned", color="positive")
+
+
+def _add_loot_for_selected_node(password: str, ntlm_hash: str) -> None:
+    """Attach password/hash loot to the currently selected node and refresh UI."""
+    global selected_node_id
+    password = password.strip()
+    ntlm_hash = ntlm_hash.strip().lower()
+
+    if not selected_node_id or selected_node_id not in graph_engine.graph:
+        ui.notify("Select a node first", color="warning")
+        return
+    if not password and not ntlm_hash:
+        ui.notify("Provide a password or NTLM hash", color="warning")
+        return
+
+    principal, domain, username = _parse_identity_parts(selected_node_id)
+    loot_manager.upsert_credential(
+        principal=principal,
+        username=username,
+        domain=domain,
+        password=password,
+        ntlm_hash=ntlm_hash,
+        source="node:quick-add",
+    )
+
+    if loot_refresh_callback:
+        loot_refresh_callback()
+    _refresh_chart(manual_path=[selected_node_id])
+    _recalculate_live_path(notify_when_missing=True)
+    _set_status(f"Added loot for: {selected_node_label or selected_node_id}")
+    ui.notify("Loot added for selected node", color="positive")
+
+
 def _on_graph_click(event: events.GenericEventArguments) -> None:
     """Generate exploit command when a node or edge is clicked."""
+    global selected_node_id, selected_node_label
     args = event.args if isinstance(event.args, dict) else {}
     data_type = str(args.get("dataType", ""))
     data = args.get("data", {}) if isinstance(args.get("data"), dict) else {}
@@ -407,6 +607,8 @@ def _on_graph_click(event: events.GenericEventArguments) -> None:
         node_id = str(data.get("id", ""))
         node_attrs = graph_engine.graph.nodes[node_id] if node_id in graph_engine.graph else {}
         node_name = str(node_attrs.get("name", node_id))
+        selected_node_id = node_id
+        selected_node_label = node_name
         node_ctx = _node_context(node_id)
         commands = []
 
@@ -449,12 +651,16 @@ def _upsert_loot(payload: dict[str, str]) -> None:
         ntlm_hash=payload.get("ntlm_hash", ""),
         kerberos_ticket=payload.get("kerberos_ticket", ""),
     )
+    _recalculate_live_path(notify_when_missing=True)
     ui.notify("Credential saved", color="positive")
 
 
 def _import_loot(raw_text: str) -> int:
     """Parse and store credentials from external tooling output."""
-    return loot_manager.import_secrets_text(raw_text)
+    imported = loot_manager.import_secrets_text(raw_text)
+    if imported:
+        _recalculate_live_path(notify_when_missing=True)
+    return imported
 
 
 async def handle_upload(event: events.UploadEventArguments) -> None:
@@ -470,7 +676,9 @@ async def handle_upload(event: events.UploadEventArguments) -> None:
                 graph_engine.clear()
                 notes_store.clear()
                 session_state.load_session(raw_json, graph_engine, loot_manager, notes_store)
+                highlighted_manual_path.clear()
                 _refresh_chart()
+                _recalculate_live_path(notify_when_missing=True)
                 if loot_refresh_callback:
                     loot_refresh_callback()
                 _set_status(
@@ -495,7 +703,9 @@ async def handle_upload(event: events.UploadEventArguments) -> None:
                 loaded_data[dataset] = parsed[dataset]
 
         graph_engine.build_from_sharphound(loaded_data)
+        highlighted_manual_path.clear()
         _refresh_chart()
+        _recalculate_live_path(notify_when_missing=True)
         _set_status(
             f"Loaded {graph_engine.graph.number_of_nodes()} nodes / "
             f"{graph_engine.graph.number_of_edges()} edges",
@@ -510,6 +720,7 @@ async def handle_upload(event: events.UploadEventArguments) -> None:
 
 def on_find_path(source: str, target: str) -> None:
     """Find and highlight the shortest attack path."""
+    global highlighted_manual_path
     source = source.strip()
     target = target.strip()
     if not source or not target:
@@ -523,7 +734,8 @@ def on_find_path(source: str, target: str) -> None:
         _refresh_chart()
         return
 
-    _refresh_chart(path)
+    highlighted_manual_path = path
+    _refresh_chart()
     hops = max(len(path) - 1, 0)
     _set_status(f"Shortest path found: {hops} hops")
     ui.notify("Path highlighted", color="positive")
@@ -572,6 +784,11 @@ def build_ui() -> None:
 
     with ui.left_drawer(value=True).classes("bg-zinc-950 text-slate-200 w-72 p-4"):
         ui.label("Attack Shortcuts").classes("text-sm uppercase tracking-wider text-slate-400")
+        ui.switch(
+            "Auto-Calculate Path to DA",
+            value=auto_calculate_path_to_da,
+            on_change=lambda e: _set_auto_calculate_path(bool(e.value)),
+        ).classes("w-full text-slate-200")
         ui.separator().classes("bg-zinc-800")
         (
             ui.button(
@@ -613,6 +830,14 @@ def build_ui() -> None:
             .props("flat")
             .classes("w-full justify-start text-slate-200")
         )
+        (
+            ui.button(
+                "Show Owned Objects",
+                on_click=lambda: _set_filter("owned"),
+            )
+            .props("outline")
+            .classes("w-full mt-2 border-green-600 text-green-300")
+        )
         ui.separator().classes("bg-zinc-800 mt-2")
         (
             ui.button(
@@ -628,6 +853,8 @@ def build_ui() -> None:
                 on_click=lambda: (
                     loaded_data.update({"users": [], "computers": [], "groups": []}),
                     graph_engine.clear(),
+                    highlighted_manual_path.clear(),
+                    highlighted_live_path.clear(),
                     _set_filter("all"),
                     _refresh_chart(),
                     _set_status("Graph reset"),
@@ -650,6 +877,32 @@ def build_ui() -> None:
                 edge_selection_label = ui.label(
                     "Click an edge or kerberoastable node"
                 ).classes("text-slate-400 text-xs italic pb-1")
+                with ui.card().classes("w-full bg-zinc-900/70 border border-zinc-800 p-2 mb-2"):
+                    ui.label("Selected Node Actions").classes(
+                        "text-xs uppercase tracking-wider text-slate-400"
+                    )
+                    (
+                        ui.button("Mark Selected Owned", on_click=_mark_selected_node_owned)
+                        .props("outline icon=check_circle")
+                        .classes("w-full border-green-600 text-green-300 mt-1")
+                    )
+                    with ui.row().classes("w-full gap-2 mt-2"):
+                        quick_pwd_input = ui.input("Password").props("type=password").classes("w-full")
+                        quick_hash_input = ui.input("NTLM hash").classes("w-full")
+
+                    def _quick_add_loot() -> None:
+                        _add_loot_for_selected_node(
+                            quick_pwd_input.value or "",
+                            quick_hash_input.value or "",
+                        )
+                        quick_pwd_input.value = ""
+                        quick_hash_input.value = ""
+
+                    (
+                        ui.button("Add Loot To Selected", on_click=_quick_add_loot)
+                        .props("outline icon=key")
+                        .classes("w-full border-yellow-600 text-yellow-300 mt-1")
+                    )
                 oracle_content_container = ui.column().classes("w-full gap-1")
             with ui.tab_panel(right_notes_tab):
                 update_notes_panel_callback = create_notes_panel(
@@ -662,6 +915,32 @@ def build_ui() -> None:
             status_label = ui.label("Awaiting SharpHound upload...").classes("text-slate-300")
             create_upload_dropzone(handle_upload)
             create_search_bar(on_find_path)
+            with ui.row().classes("w-full items-end gap-2 mt-2"):
+                owned_query_input = ui.input("Find object (SID or Name)").classes("w-full")
+                (
+                    ui.button(
+                        "Find",
+                        on_click=lambda: _find_object(owned_query_input.value or ""),
+                    )
+                    .props("outline")
+                    .classes("border-cyan-600 text-cyan-300")
+                )
+                (
+                    ui.button(
+                        "Mark Owned",
+                        on_click=lambda: _set_owned_by_query(owned_query_input.value or "", True),
+                    )
+                    .props("outline")
+                    .classes("border-green-600 text-green-300")
+                )
+                (
+                    ui.button(
+                        "Unmark",
+                        on_click=lambda: _set_owned_by_query(owned_query_input.value or "", False),
+                    )
+                    .props("outline")
+                    .classes("border-zinc-600 text-slate-300")
+                )
 
         with ui.tabs().classes("w-full") as tabs:
             graph_tab = ui.tab("Graph View")

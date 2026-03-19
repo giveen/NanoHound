@@ -21,6 +21,24 @@ class NanoGraphEngine:
         "ForceChangePassword": "CanForceChangePassword",
     }
 
+    # Lower is better/easier during live-path calculation.
+    EDGE_WEIGHT_MAP = {
+        "MemberOf": 0,
+        "GenericAll": 1,
+        "Owns": 1,
+        "WriteDacl": 2,
+        "CanWriteDacl": 2,
+        "WriteOwner": 2,
+        "CanWriteOwner": 2,
+        "GenericWrite": 2,
+        "CanGenericWrite": 2,
+        "AddMember": 2,
+        "CanAddMember": 2,
+        "AllExtendedRights": 2,
+        "CanForceChangePassword": 2,
+        "ForceChangePassword": 2,
+    }
+
     def __init__(self) -> None:
         self.graph: nx.DiGraph = nx.DiGraph()
 
@@ -73,11 +91,13 @@ class NanoGraphEngine:
             return
 
         relationship = self.PERMISSION_MAP.get(right_name, right_name or "UnknownRight")
+        weight = self.EDGE_WEIGHT_MAP.get(right_name, self.EDGE_WEIGHT_MAP.get(relationship, 3))
         self.graph.add_edge(
             principal,
             target,
             relationship=relationship,
             raw_right=right_name,
+            weight=weight,
         )
 
     def _attach_aces(self, entity: dict[str, Any], target_id: str) -> None:
@@ -150,7 +170,69 @@ class NanoGraphEngine:
                         entity_id,
                         relationship="MemberOf",
                         raw_right="MemberOf",
+                        weight=self.EDGE_WEIGHT_MAP["MemberOf"],
                     )
+
+    def _is_target_group(self, node_id: str, target_group: str) -> bool:
+        attrs = self.graph.nodes[node_id]
+        if str(attrs.get("type", "")).casefold() != "group":
+            return False
+
+        needle = target_group.strip().casefold()
+        if not needle:
+            return False
+
+        node_name = str(attrs.get("name", "")).casefold()
+        node_base = node_name.split("@", maxsplit=1)[0].strip()
+        return needle in {node_name, node_base} or needle in node_name
+
+    def get_shortest_path_from_owned(self, target_group: str = "DOMAIN ADMINS") -> list[str] | None:
+        """Return the easiest weighted path from any owned node to a target group.
+
+        Uses multi-source Dijkstra so every owned node acts as a starting beachhead.
+        """
+        owned_sources = [
+            str(node_id)
+            for node_id, attrs in self.graph.nodes(data=True)
+            if bool(attrs.get("is_owned"))
+        ]
+        if not owned_sources:
+            return None
+
+        target_nodes = [
+            str(node_id)
+            for node_id in self.graph.nodes
+            if self._is_target_group(str(node_id), target_group)
+        ]
+        if not target_nodes:
+            return None
+
+        try:
+            paths = nx.multi_source_dijkstra_path(
+                self.graph,
+                sources=owned_sources,
+                weight="weight",
+            )
+        except (nx.NetworkXNoPath, nx.NodeNotFound, ValueError):
+            return None
+
+        best_path: list[str] | None = None
+        best_cost: float | None = None
+        for target in target_nodes:
+            path = paths.get(target)
+            if not path:
+                continue
+
+            cost = 0.0
+            for src, dst in zip(path, path[1:]):
+                edge = self.graph.get_edge_data(src, dst) or {}
+                cost += float(edge.get("weight", 1))
+
+            if best_cost is None or cost < best_cost:
+                best_cost = cost
+                best_path = [str(node) for node in path]
+
+        return best_path
 
     def _resolve_node(self, candidate: str) -> str | None:
         if candidate in self.graph:
