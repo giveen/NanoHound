@@ -31,7 +31,14 @@ graph_engine = NanoGraphEngine()
 loot_manager = LootManager()
 notes_store = NotesStore()
 command_oracle = CommandOracle(loot_manager)
-loaded_data: dict[str, list[dict]] = {"users": [], "computers": [], "groups": []}
+
+
+def _empty_loaded_data() -> dict[str, list[dict]]:
+    """Return an empty dataset map for all ingestor-supported SharpHound exports."""
+    return ingestor.empty_parsed()
+
+
+loaded_data: dict[str, list[dict]] = _empty_loaded_data()
 status_label = None
 chart_placeholder = None
 active_filter = "all"
@@ -914,7 +921,7 @@ async def handle_upload(event: events.UploadEventArguments) -> None:
                     "JSON upload must be users.json, computers.json, or groups.json "
                     "(or a NanoHound session file)",
                 )
-            parsed = {"users": [], "computers": [], "groups": []}
+            parsed = _empty_loaded_data()
             parsed[dataset] = ingestor.parse_json_file(temp_path, dataset=dataset)
         else:
             raise ValueError("Unsupported file type. Upload .zip or .json")
@@ -1110,7 +1117,7 @@ def build_ui() -> None:
             ui.button(
                 "Reset Graph",
                 on_click=lambda: (
-                    loaded_data.update({"users": [], "computers": [], "groups": []}),
+                    loaded_data.update(_empty_loaded_data()),
                     graph_engine.clear(),
                     highlighted_manual_path.clear(),
                     highlighted_live_path.clear(),

@@ -14,7 +14,25 @@ class SharpHoundIngestor:
         "users.json": "users",
         "computers.json": "computers",
         "groups.json": "groups",
+        "domains.json": "domains",
+        "ous.json": "ous",
+        "gpos.json": "gpos",
+        "containers.json": "containers",
+        "certtemplates.json": "certtemplates",
+        "enterprisecas.json": "enterprisecas",
+        "rootcas.json": "rootcas",
+        "aiacas.json": "aiacas",
+        "ntauthstores.json": "ntauthstores",
+        "issuancepolicies.json": "issuancepolicies",
     }
+
+    @classmethod
+    def empty_parsed(cls) -> dict[str, list[dict]]:
+        """Return a zeroed parsed-datasets container for all supported keys."""
+        return {
+            dataset: []
+            for dataset in sorted(set(cls.TARGET_FILES.values()))
+        }
 
     @classmethod
     def classify_filename(cls, filename: str) -> str | None:
@@ -87,11 +105,7 @@ class SharpHoundIngestor:
 
     def unzip_and_parse(self, archive_path: str | Path) -> dict[str, list[dict]]:
         """Extract and parse relevant SharpHound files from a zip archive."""
-        parsed: dict[str, list[dict]] = {
-            "users": [],
-            "computers": [],
-            "groups": [],
-        }
+        parsed = self.empty_parsed()
 
         with ZipFile(archive_path, "r") as archive:
             for info in archive.infolist():
@@ -112,11 +126,7 @@ class SharpHoundIngestor:
         if input_path.suffix.lower() == ".zip":
             return self.unzip_and_parse(input_path)
 
-        parsed: dict[str, list[dict]] = {
-            "users": [],
-            "computers": [],
-            "groups": [],
-        }
+        parsed = self.empty_parsed()
 
         if input_path.is_file() and input_path.suffix.lower() == ".json":
             dataset = self.classify_filename(input_path.name)

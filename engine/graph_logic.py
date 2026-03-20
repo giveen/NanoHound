@@ -19,6 +19,20 @@ class NanoGraphEngine:
         "MemberOf": "MemberOf",
         "AllExtendedRights": "AllExtendedRights",
         "ForceChangePassword": "CanForceChangePassword",
+        "ADCSESC1": "ADCSESC1",
+        "ADCSESC3": "ADCSESC3",
+        "ADCSESC4": "ADCSESC4",
+        "ADCSESC6a": "ADCSESC6a",
+        "ADCSESC6A": "ADCSESC6a",
+        "ADCSESC6b": "ADCSESC6b",
+        "ADCSESC6B": "ADCSESC6b",
+        "ADCSESC9a": "ADCSESC9a",
+        "ADCSESC9A": "ADCSESC9a",
+        "ADCSESC9b": "ADCSESC9b",
+        "ADCSESC9B": "ADCSESC9b",
+        "ADCSESC10a": "ADCSESC10a",
+        "ADCSESC10b": "ADCSESC10b",
+        "ADCSESC13": "ADCSESC13",
     }
 
     # Lower is better/easier during live-path calculation.
@@ -37,6 +51,20 @@ class NanoGraphEngine:
         "AllExtendedRights": 2,
         "CanForceChangePassword": 2,
         "ForceChangePassword": 2,
+        "ADCSESC1": 1,
+        "ADCSESC3": 1,
+        "ADCSESC4": 1,
+        "ADCSESC6a": 1,
+        "ADCSESC6A": 1,
+        "ADCSESC6b": 1,
+        "ADCSESC6B": 1,
+        "ADCSESC9a": 1,
+        "ADCSESC9A": 1,
+        "ADCSESC9b": 1,
+        "ADCSESC9B": 1,
+        "ADCSESC10a": 1,
+        "ADCSESC10b": 1,
+        "ADCSESC13": 1,
     }
 
     # Preferred right label when multiple rights exist on the same directed edge.
@@ -55,8 +83,38 @@ class NanoGraphEngine:
         "AddMember",
         "CanAddMember",
         "AllExtendedRights",
+        "ADCSESC1",
+        "ADCSESC3",
+        "ADCSESC4",
+        "ADCSESC6a",
+        "ADCSESC6A",
+        "ADCSESC6b",
+        "ADCSESC6B",
+        "ADCSESC9a",
+        "ADCSESC9A",
+        "ADCSESC9b",
+        "ADCSESC9B",
+        "ADCSESC10a",
+        "ADCSESC10b",
+        "ADCSESC13",
         "MemberOf",
     ]
+
+    DATASET_NODE_TYPE_MAP = {
+        "users": "user",
+        "computers": "computer",
+        "groups": "group",
+        "domains": "domain",
+        "ous": "ou",
+        "gpos": "gpo",
+        "containers": "container",
+        "certtemplates": "certtemplate",
+        "enterprisecas": "enterpriseca",
+        "rootcas": "rootca",
+        "aiacas": "aiaca",
+        "ntauthstores": "ntauthstore",
+        "issuancepolicies": "issuancepolicy",
+    }
 
     def __init__(self) -> None:
         self.graph: nx.DiGraph = nx.DiGraph()
@@ -199,7 +257,12 @@ class NanoGraphEngine:
         """Build graph nodes and edges from parsed SharpHound datasets."""
         self.clear()
 
-        for dataset in ("users", "computers", "groups"):
+        ordered_datasets = [
+            dataset
+            for dataset in self.DATASET_NODE_TYPE_MAP
+            if dataset in data
+        ]
+        for dataset in ordered_datasets:
             for entity in data.get(dataset, []):
                 if not isinstance(entity, dict):
                     continue
@@ -209,7 +272,7 @@ class NanoGraphEngine:
                     continue
 
                 node_attrs: dict[str, Any] = {
-                    "type": dataset[:-1],
+                    "type": self.DATASET_NODE_TYPE_MAP.get(dataset, dataset.rstrip("s")),
                     "name": self._entity_name(entity) or entity_id,
                 }
 

