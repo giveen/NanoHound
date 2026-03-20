@@ -72,8 +72,8 @@ def create_upload_dropzone(
 def create_search_bar(on_search: Callable[[str, str], None]):
     """Create the source/target shortest path search UI."""
     with ui.row().classes("w-full items-end gap-3"):
-        source_input = ui.input("Source (SID or Name)").classes("w-full")
-        target_input = ui.input("Target (SID or Name)").classes("w-full")
+        source_input = ui.input("Source (SID or Name)").classes("w-full text-white")
+        target_input = ui.input("Target (SID or Name)").classes("w-full text-white")
         ui.button(
             "Find Attack Path",
             on_click=lambda: on_search(source_input.value or "", target_input.value or ""),

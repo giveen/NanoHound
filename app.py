@@ -41,6 +41,9 @@ oracle_content_container = None
 selected_edge_command = ""
 update_notes_panel_callback: Callable[[str, str], None] | None = None
 update_selected_node_panel_callback: Callable[[str], None] | None = None
+show_oracle_tab_callback: Callable[[], None] | None = None
+path_source_input = None
+path_target_input = None
 selected_node_id = ""
 selected_node_label = ""
 highlighted_manual_path: list[str] = []
@@ -550,6 +553,8 @@ def _render_oracle_panel(
     global selected_edge_command, oracle_content_container
 
     selected_edge_command = commands[0][1] if commands else ""
+    if show_oracle_tab_callback is not None:
+        show_oracle_tab_callback()
     if edge_selection_label is not None:
         edge_selection_label.text = summary
     if oracle_content_container is None:
@@ -575,8 +580,75 @@ def _render_oracle_panel(
             (
                 ui.button("Copy", on_click=_make_copy_handler())
                 .props("flat size=sm icon=content_copy")
-                .classes("text-red-200 self-end")
+                .classes("text-white self-end")
             )
+
+
+def _set_path_inputs(source: str = "", target: str = "") -> None:
+    """Update the path finder inputs when graph interactions provide context."""
+    if path_source_input is not None and source:
+        path_source_input.value = source
+        path_source_input.update()
+    if path_target_input is not None and target:
+        path_target_input.value = target
+        path_target_input.update()
+
+
+def _default_source_target() -> tuple[str, str]:
+    """Return best-effort defaults for path source/target input fields.
+
+    Source preference: first owned node, otherwise first user node, otherwise any node.
+    Target preference: Domain Admins group by normalized match, otherwise first group.
+    """
+    source_value = ""
+    target_value = ""
+
+    owned_nodes: list[tuple[str, dict[str, Any]]] = []
+    user_nodes: list[tuple[str, dict[str, Any]]] = []
+    group_nodes: list[tuple[str, dict[str, Any]]] = []
+    all_nodes: list[tuple[str, dict[str, Any]]] = []
+
+    for node_id, attrs in graph_engine.graph.nodes(data=True):
+        all_nodes.append((str(node_id), attrs))
+        node_type = str(attrs.get("type", "")).casefold()
+        if bool(attrs.get("is_owned")):
+            owned_nodes.append((str(node_id), attrs))
+        if node_type == "user":
+            user_nodes.append((str(node_id), attrs))
+        if node_type == "group":
+            group_nodes.append((str(node_id), attrs))
+
+    if owned_nodes:
+        source_value = str(owned_nodes[0][1].get("name") or owned_nodes[0][0])
+    elif user_nodes:
+        source_value = str(user_nodes[0][1].get("name") or user_nodes[0][0])
+    elif all_nodes:
+        source_value = str(all_nodes[0][1].get("name") or all_nodes[0][0])
+
+    domain_admin_group = next(
+        (
+            (node_id, attrs)
+            for node_id, attrs in group_nodes
+            if graph_engine._is_target_group(node_id, "DOMAIN ADMINS")
+        ),
+        None,
+    )
+    if domain_admin_group is not None:
+        target_value = str(domain_admin_group[1].get("name") or domain_admin_group[0])
+    elif group_nodes:
+        target_value = str(group_nodes[0][1].get("name") or group_nodes[0][0])
+    else:
+        target_value = "DOMAIN ADMINS"
+
+    return source_value, target_value
+
+
+def _autofill_path_inputs() -> None:
+    """Populate source/target path fields with best-effort graph defaults."""
+    source_value, target_value = _default_source_target()
+    if not source_value and not target_value:
+        return
+    _set_path_inputs(source=source_value, target=target_value)
 
 
 def _extract_domain(name: str) -> str:
@@ -600,6 +672,42 @@ def _node_context(node_id: str) -> dict[str, str]:
         "spn": str(attrs.get("spn", "")),
         "domain": str(attrs.get("domain") or _extract_domain(node_name)),
     }
+
+
+def _resolve_node_reference(value: Any) -> str:
+    """Resolve chart click node refs (id/name/index-like values) into graph node ids."""
+    if isinstance(value, dict):
+        for key in ("id", "name", "value"):
+            if key in value:
+                return _resolve_node_reference(value[key])
+        return ""
+
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    if candidate in graph_engine.graph:
+        return candidate
+
+    # Fallback to name lookup when the chart emits node names.
+    lowered = candidate.casefold()
+    for node_id, attrs in graph_engine.graph.nodes(data=True):
+        node_name = str(attrs.get("name", "")).casefold()
+        if node_name == lowered:
+            return str(node_id)
+
+    return candidate
+
+
+def _edge_relationship(source_id: str, target_id: str, fallback: str = "") -> str:
+    """Get edge type from graph first, fallback to chart payload value."""
+    edge_data = graph_engine.graph.get_edge_data(source_id, target_id) or {}
+    relationship = str(
+        edge_data.get("raw_right")
+        or edge_data.get("relationship")
+        or fallback
+        or "Unknown"
+    )
+    return relationship
 
 
 def _parse_identity_parts(node_id: str) -> tuple[str, str, str]:
@@ -672,18 +780,31 @@ def _on_graph_click(event: events.GenericEventArguments) -> None:
     """Generate exploit command when a node or edge is clicked."""
     global selected_node_id, selected_node_label
     args = event.args if isinstance(event.args, dict) else {}
-    data_type = str(args.get("dataType", ""))
+    data_type = str(args.get("dataType", "")).casefold()
     data = args.get("data", {}) if isinstance(args.get("data"), dict) else {}
 
+    # ECharts/NiceGUI payloads vary depending on where the user clicks (line vs label).
+    # Infer edge/node intent when dataType is missing or inconsistent.
+    if data_type not in {"edge", "node"}:
+        if "source" in data and "target" in data:
+            data_type = "edge"
+        elif "id" in data:
+            data_type = "node"
+
     if data_type == "edge":
-        source_id = str(data.get("source", ""))
-        target_id = str(data.get("target", ""))
-        edge_type = str(data.get("edge_type") or data.get("value") or "Unknown")
+        source_id = _resolve_node_reference(data.get("source", ""))
+        target_id = _resolve_node_reference(data.get("target", ""))
+        edge_type = _edge_relationship(
+            source_id,
+            target_id,
+            fallback=str(data.get("edge_type") or data.get("value") or ""),
+        )
         if not source_id or not target_id:
             return
 
         source_node = _node_context(source_id)
         target_node = _node_context(target_id)
+        _set_path_inputs(source_node["name"], target_node["name"])
         exploit_cmd = command_oracle.get_exploit_command(edge_type, source_node, target_node)
         summary = f"{source_node['name']} -[{edge_type}]\u2192 {target_node['name']}"
         commands: list[tuple[str, str]] = [("Exploit Command", exploit_cmd)]
@@ -703,6 +824,7 @@ def _on_graph_click(event: events.GenericEventArguments) -> None:
         node_name = str(node_attrs.get("name", node_id))
         selected_node_id = node_id
         selected_node_label = node_name
+        _set_path_inputs(source=node_name)
         if bool(node_attrs.get("is_owned")):
             _set_owned_focus(node_id)
         if update_selected_node_panel_callback:
@@ -775,6 +897,7 @@ async def handle_upload(event: events.UploadEventArguments) -> None:
                 notes_store.clear()
                 session_state.load_session(raw_json, graph_engine, loot_manager, notes_store)
                 highlighted_manual_path.clear()
+                _autofill_path_inputs()
                 _refresh_chart()
                 _recalculate_live_path(notify_when_missing=True)
                 if loot_refresh_callback:
@@ -802,6 +925,7 @@ async def handle_upload(event: events.UploadEventArguments) -> None:
 
         graph_engine.build_from_sharphound(loaded_data)
         highlighted_manual_path.clear()
+        _autofill_path_inputs()
         _refresh_chart()
         _recalculate_live_path(notify_when_missing=True)
         _set_status(
@@ -834,6 +958,27 @@ def on_find_path(source: str, target: str) -> None:
 
     highlighted_manual_path = path
     _refresh_chart()
+
+    edge_commands: list[tuple[str, str]] = []
+    for source_id, target_id in zip(path, path[1:]):
+        source_ctx = _node_context(source_id)
+        target_ctx = _node_context(target_id)
+        edge_type = _edge_relationship(source_id, target_id)
+        edge_label = f"{source_ctx['name']} -[{edge_type}]-> {target_ctx['name']}"
+        edge_commands.append(
+            (
+                edge_label,
+                command_oracle.get_exploit_command(edge_type, source_ctx, target_ctx),
+            )
+        )
+
+    if edge_commands:
+        summary = (
+            f"Path: {source} -> {target} ({len(path) - 1} hop"
+            f"{'s' if len(path) - 1 != 1 else ''})"
+        )
+        _render_oracle_panel(summary, edge_commands)
+
     hops = max(len(path) - 1, 0)
     _set_status(f"Shortest path found: {hops} hops")
     ui.notify("Path highlighted", color="positive")
@@ -850,7 +995,8 @@ def build_ui() -> None:
     """Construct the NanoHound dark-mode interface."""
     global chart_placeholder, status_label, loot_refresh_callback
     global edge_selection_label, oracle_content_container, update_notes_panel_callback
-    global update_selected_node_panel_callback
+    global update_selected_node_panel_callback, show_oracle_tab_callback
+    global path_source_input, path_target_input
 
     ui.colors(
         primary="#27272a",
@@ -869,6 +1015,12 @@ def build_ui() -> None:
         <style>
             body { background: radial-gradient(circle at 10% 10%, #18181b 0%, #09090b 55%); }
             .nanohound-card { backdrop-filter: blur(2px); }
+            .q-btn, .q-tab, .q-field__label, .q-field input, .q-field textarea, .q-field__native {
+                color: #ffffff !important;
+            }
+            .q-btn .q-icon, .q-tab .q-icon {
+                color: #ffffff !important;
+            }
         </style>
         """,
     )
@@ -911,7 +1063,7 @@ def build_ui() -> None:
                 on_click=lambda: _set_filter("kerberoastable"),
             )
             .props("outline")
-            .classes("w-full mt-2 border-orange-500 text-orange-300")
+            .classes("w-full mt-2 border-orange-500 text-white")
         )
         (
             ui.button(
@@ -919,7 +1071,7 @@ def build_ui() -> None:
                 on_click=lambda: _set_filter("asrep_roastable"),
             )
             .props("outline")
-            .classes("w-full mt-2 border-red-600 text-red-300")
+            .classes("w-full mt-2 border-red-600 text-white")
         )
         (
             ui.button(
@@ -935,7 +1087,7 @@ def build_ui() -> None:
                 on_click=lambda: _set_filter("owned"),
             )
             .props("outline")
-            .classes("w-full mt-2 border-green-600 text-green-300")
+            .classes("w-full mt-2 border-green-600 text-white")
         )
         (
             ui.button(
@@ -943,7 +1095,7 @@ def build_ui() -> None:
                 on_click=lambda: (_clear_owned_focus(), _refresh_chart(), _set_status("Owned focus cleared")),
             )
             .props("outline")
-            .classes("w-full mt-2 border-cyan-700 text-cyan-300")
+            .classes("w-full mt-2 border-cyan-700 text-white")
         )
         ui.separator().classes("bg-zinc-800 mt-2")
         (
@@ -952,7 +1104,7 @@ def build_ui() -> None:
                 on_click=_sync_local_loot,
             )
             .props("outline")
-            .classes("w-full mt-2 border-yellow-600 text-yellow-300")
+            .classes("w-full mt-2 border-yellow-600 text-white")
         )
         (
             ui.button(
@@ -976,6 +1128,12 @@ def build_ui() -> None:
         with ui.tabs().classes("w-full") as right_tabs:
             right_oracle_tab = ui.tab("Oracle", icon="bolt")
             right_notes_tab = ui.tab("Notes", icon="description")
+
+        def _show_oracle_tab() -> None:
+            right_tabs.value = right_oracle_tab
+
+        show_oracle_tab_callback = _show_oracle_tab
+
         with ui.tab_panels(right_tabs, value=right_oracle_tab).classes("w-full"):
             with ui.tab_panel(right_oracle_tab):
                 ui.label("Command Oracle").classes(
@@ -1029,12 +1187,12 @@ def build_ui() -> None:
                         (
                             ui.button("Mark Selected Owned", on_click=_mark_selected_node_owned)
                             .props("outline icon=check_circle")
-                            .classes("w-full border-green-600 text-green-300")
+                            .classes("w-full border-green-600 text-white")
                         )
                         (
                             ui.button("Add Loot", on_click=_quick_add_loot_from_details)
                             .props("outline icon=key")
-                            .classes("w-full border-yellow-600 text-yellow-300")
+                            .classes("w-full border-yellow-600 text-white")
                         )
 
                     def _update_selected_node_panel(node_id: str) -> None:
@@ -1073,7 +1231,77 @@ def build_ui() -> None:
             with ui.card().classes("w-full bg-transparent border-0 shadow-none"):
                 status_label = ui.label("Awaiting SharpHound upload...").classes("text-white")
                 create_upload_dropzone(handle_upload)
-                create_search_bar(on_find_path)
+                path_source_input, path_target_input = create_search_bar(on_find_path)
+                path_source_hint = ui.label("Source: start typing to see suggestions").classes(
+                    "text-xs text-white"
+                )
+                path_source_suggestions = ui.column().classes("w-full gap-1")
+                path_target_hint = ui.label("Target: start typing to see suggestions").classes(
+                    "text-xs text-white"
+                )
+                path_target_suggestions = ui.column().classes("w-full gap-1")
+
+                def _refresh_path_suggestions(
+                    query: str,
+                    kind: str,
+                    hint_label: Any,
+                    container: Any,
+                ) -> None:
+                    container.clear()
+                    candidates = _autocomplete_candidates(query)
+                    if not query.strip():
+                        hint_label.text = f"{kind}: start typing to see suggestions"
+                        return
+                    if not candidates:
+                        hint_label.text = f"{kind}: no matches"
+                        return
+
+                    hint_label.text = f"{kind}: {len(candidates)} suggestion(s)"
+                    with container:
+                        for node_id, label in candidates:
+                            node_type = str(
+                                graph_engine.graph.nodes.get(node_id, {}).get("type", "entity")
+                            )
+
+                            def _fill_source(entry: str = label) -> None:
+                                if path_source_input is not None:
+                                    path_source_input.value = entry
+                                    path_source_input.update()
+
+                            def _fill_target(entry: str = label) -> None:
+                                if path_target_input is not None:
+                                    path_target_input.value = entry
+                                    path_target_input.update()
+
+                            on_click_handler = _fill_source if kind == "Source" else _fill_target
+                            (
+                                ui.button(
+                                    f"{label} [{node_type}]",
+                                    on_click=on_click_handler,
+                                )
+                                .props("flat dense")
+                                .classes(
+                                    "w-full justify-start text-left text-white "
+                                    "hover:bg-zinc-800 rounded"
+                                )
+                            )
+
+                path_source_input.on_value_change(
+                    lambda e: _refresh_path_suggestions(
+                        e.value or "",
+                        "Source",
+                        path_source_hint,
+                        path_source_suggestions,
+                    )
+                )
+                path_target_input.on_value_change(
+                    lambda e: _refresh_path_suggestions(
+                        e.value or "",
+                        "Target",
+                        path_target_hint,
+                        path_target_suggestions,
+                    )
+                )
                 with ui.row().classes("w-full items-end gap-2 mt-2"):
                     owned_query_input = ui.input("Find object (SID or Name)").classes("w-full")
                     (
@@ -1082,7 +1310,7 @@ def build_ui() -> None:
                             on_click=lambda: _find_object(owned_query_input.value or ""),
                         )
                         .props("outline")
-                        .classes("border-cyan-600 text-cyan-300")
+                        .classes("border-cyan-600 text-white")
                     )
                     (
                         ui.button(
@@ -1090,7 +1318,7 @@ def build_ui() -> None:
                             on_click=lambda: _set_owned_by_query(owned_query_input.value or "", True),
                         )
                         .props("outline")
-                        .classes("border-green-600 text-green-300")
+                        .classes("border-green-600 text-white")
                     )
                     (
                         ui.button(

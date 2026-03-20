@@ -39,6 +39,25 @@ class NanoGraphEngine:
         "ForceChangePassword": 2,
     }
 
+    # Preferred right label when multiple rights exist on the same directed edge.
+    EDGE_DISPLAY_PRIORITY = [
+        "DCSync",
+        "ForceChangePassword",
+        "CanForceChangePassword",
+        "GenericAll",
+        "Owns",
+        "WriteDacl",
+        "CanWriteDacl",
+        "WriteOwner",
+        "CanWriteOwner",
+        "GenericWrite",
+        "CanGenericWrite",
+        "AddMember",
+        "CanAddMember",
+        "AllExtendedRights",
+        "MemberOf",
+    ]
+
     def __init__(self) -> None:
         self.graph: nx.DiGraph = nx.DiGraph()
 
@@ -90,14 +109,76 @@ class NanoGraphEngine:
         if not principal or not target:
             return
 
-        relationship = self.PERMISSION_MAP.get(right_name, right_name or "UnknownRight")
-        weight = self.EDGE_WEIGHT_MAP.get(right_name, self.EDGE_WEIGHT_MAP.get(relationship, 3))
+        normalized_right = right_name or "UnknownRight"
+
+        edge = self.graph.get_edge_data(principal, target)
+        if edge:
+            existing_rights = set(edge.get("raw_rights") or [])
+            existing_raw = str(edge.get("raw_right", "")).strip()
+            if existing_raw:
+                existing_rights.add(existing_raw)
+            existing_rights.add(normalized_right)
+
+            preferred_raw_right = self._preferred_right(existing_rights)
+            preferred_relationship = self.PERMISSION_MAP.get(
+                preferred_raw_right,
+                preferred_raw_right or "UnknownRight",
+            )
+
+            min_weight = min(
+                int(
+                    self.EDGE_WEIGHT_MAP.get(
+                        right,
+                        self.EDGE_WEIGHT_MAP.get(
+                            str(self.PERMISSION_MAP.get(right, right) or right),
+                            3,
+                        ),
+                    )
+                )
+                for right in existing_rights
+            )
+
+            self.graph.add_edge(
+                principal,
+                target,
+                relationship=preferred_relationship,
+                raw_right=preferred_raw_right,
+                raw_rights=self._sorted_rights(existing_rights),
+                weight=min_weight,
+            )
+            return
+
+        relationship = self.PERMISSION_MAP.get(normalized_right, normalized_right)
+        weight = self.EDGE_WEIGHT_MAP.get(
+            normalized_right,
+            self.EDGE_WEIGHT_MAP.get(relationship, 3),
+        )
         self.graph.add_edge(
             principal,
             target,
             relationship=relationship,
-            raw_right=right_name,
+            raw_right=normalized_right,
+            raw_rights=[normalized_right],
             weight=weight,
+        )
+
+    def _preferred_right(self, rights: set[str]) -> str:
+        """Choose a stable display right when multiple rights exist on one edge."""
+        if not rights:
+            return "UnknownRight"
+
+        by_priority = {name: idx for idx, name in enumerate(self.EDGE_DISPLAY_PRIORITY)}
+        return min(
+            rights,
+            key=lambda right: (by_priority.get(right, len(self.EDGE_DISPLAY_PRIORITY)), right),
+        )
+
+    def _sorted_rights(self, rights: set[str]) -> list[str]:
+        """Sort rights by display priority for deterministic UI output."""
+        by_priority = {name: idx for idx, name in enumerate(self.EDGE_DISPLAY_PRIORITY)}
+        return sorted(
+            rights,
+            key=lambda right: (by_priority.get(right, len(self.EDGE_DISPLAY_PRIORITY)), right),
         )
 
     def _attach_aces(self, entity: dict[str, Any], target_id: str) -> None:
