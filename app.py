@@ -918,8 +918,9 @@ async def handle_upload(event: events.UploadEventArguments) -> None:
             dataset = ingestor.classify_filename(event.file.name)
             if dataset is None:
                 raise ValueError(
-                    "JSON upload must be users.json, computers.json, or groups.json "
-                    "(or a NanoHound session file)",
+                    "JSON upload must be a recognized SharpHound dataset file "
+                    "(e.g. users/computers/groups/domains/ous/gpos/containers/ADCS exports) "
+                    "or a NanoHound session file",
                 )
             parsed = _empty_loaded_data()
             parsed[dataset] = ingestor.parse_json_file(temp_path, dataset=dataset)

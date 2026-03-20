@@ -91,6 +91,7 @@ def load_session(
     # else: leave graph empty
 
     # -- Loot ----------------------------------------------------------------
+    loot_manager.clear()
     for row in data.get("loot") or []:
         principal = (row.get("principal") or "").strip()
         if not principal:

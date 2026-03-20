@@ -95,6 +95,29 @@ class SharpHoundIngestor:
             return entries
         return [self._extract_user_attack_primitives(entry) for entry in entries]
 
+    def _merge_entries(self, existing: list[dict], incoming: list[dict]) -> list[dict]:
+        """Merge dataset rows while keeping stable order and de-duplicating by identifier."""
+        merged = list(existing)
+        seen_ids = {
+            str(entry.get("ObjectIdentifier") or entry.get("ObjectId") or "").strip()
+            for entry in merged
+            if isinstance(entry, dict)
+        }
+
+        for entry in incoming:
+            if not isinstance(entry, dict):
+                continue
+
+            entry_id = str(entry.get("ObjectIdentifier") or entry.get("ObjectId") or "").strip()
+            if entry_id and entry_id in seen_ids:
+                continue
+
+            merged.append(entry)
+            if entry_id:
+                seen_ids.add(entry_id)
+
+        return merged
+
     def parse_json_file(self, file_path: str | Path, dataset: str | None = None) -> list[dict]:
         """Parse a single SharpHound JSON file into a list of objects."""
         with Path(file_path).open("r", encoding="utf-8") as handle:
@@ -116,7 +139,8 @@ class SharpHoundIngestor:
                 with archive.open(info, "r") as raw_file:
                     payload = json.load(raw_file)
                 entries = self._normalize_payload(payload)
-                parsed[dataset] = self._extract_dataset_primitives(dataset, entries)
+                normalized = self._extract_dataset_primitives(dataset, entries)
+                parsed[dataset] = self._merge_entries(parsed[dataset], normalized)
 
         return parsed
 
@@ -135,9 +159,12 @@ class SharpHoundIngestor:
             return parsed
 
         if input_path.is_dir():
-            for filename, dataset in self.TARGET_FILES.items():
-                candidate = input_path / filename
-                if candidate.exists():
-                    parsed[dataset] = self.parse_json_file(candidate, dataset=dataset)
+            for candidate in sorted(input_path.glob("*.json")):
+                dataset = self.classify_filename(candidate.name)
+                if dataset is None:
+                    continue
+
+                entries = self.parse_json_file(candidate, dataset=dataset)
+                parsed[dataset] = self._merge_entries(parsed[dataset], entries)
 
         return parsed

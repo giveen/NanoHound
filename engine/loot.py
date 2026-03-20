@@ -41,6 +41,10 @@ class LootManager:
     def _normalize(self, value: str) -> str:
         return value.strip().casefold()
 
+    def clear(self) -> None:
+        """Remove all credential entries from the in-memory store."""
+        self._records.clear()
+
     def upsert_credential(
         self,
         principal: str,
