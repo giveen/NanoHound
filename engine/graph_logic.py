@@ -25,6 +25,9 @@ class NanoGraphEngine:
         "DumpSMSAPassword": "DumpSMSAPassword",
         "DumpSMsaPassword": "DumpSMSAPassword",
         "DumpSmsaPassword": "DumpSMSAPassword",
+        "Enroll": "Enroll",
+        "Certificate-Enrollment": "Enroll",
+        "EnrollOnBehalfOf": "EnrollOnBehalfOf",
         "GenericAll": "Owns",
         "WriteDacl": "CanWriteDacl",
         "WriteOwner": "CanWriteOwner",
@@ -76,6 +79,8 @@ class NanoGraphEngine:
         "DCFor": 1,
         "DelegatedEnrollmentAgent": 3,
         "DumpSMSAPassword": 2,
+        "Enroll": 2,
+        "EnrollOnBehalfOf": 2,
         "GenericAll": 1,
         "Owns": 1,
         "WriteDacl": 2,
@@ -154,6 +159,7 @@ class NanoGraphEngine:
         "AddMembers",
         "CanAddMember",
         "AllExtendedRights",
+        "Enroll",
         "ADCSESC1",
         "ADCSESC3",
         "ADCSESC4",
@@ -168,6 +174,7 @@ class NanoGraphEngine:
         "ADCSESC10a",
         "ADCSESC10b",
         "ADCSESC13",
+        "EnrollOnBehalfOf",
         "DumpSMSAPassword",
         "DelegatedEnrollmentAgent",
         "DCFor",
@@ -343,6 +350,166 @@ class NanoGraphEngine:
             right_name = str(ace.get("RightName") or ace.get("AceType") or "UnknownRight")
             if principal:
                 self.add_edge_from_ace(principal, target_id, right_name)
+
+    def _entity_properties(self, entity: dict[str, Any]) -> dict[str, Any]:
+        properties = entity.get("Properties", {})
+        if isinstance(properties, dict):
+            return properties
+        return {}
+
+    def _property_lookup(self, entity: dict[str, Any], *names: str) -> Any:
+        properties = self._entity_properties(entity)
+        normalized_names = {name.casefold() for name in names}
+
+        for container in (entity, properties):
+            for key, value in container.items():
+                if str(key).casefold() in normalized_names:
+                    return value
+
+        return None
+
+    def _property_list(self, entity: dict[str, Any], *names: str) -> list[str]:
+        value = self._property_lookup(entity, *names)
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return [cleaned] if cleaned else []
+        return []
+
+    def _property_number(self, entity: dict[str, Any], *names: str) -> float | None:
+        value = self._property_lookup(entity, *names)
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
+
+    def _is_enrollment_agent_template(self, entity: dict[str, Any]) -> bool:
+        eku_values = {
+            value.casefold()
+            for value in self._property_list(
+                entity,
+                "effectiveekus",
+                "EffectiveEKUs",
+                "applicationpolicies",
+                "ApplicationPolicies",
+                "certificateapplicationpolicy",
+                "CertificateApplicationPolicy",
+            )
+        }
+        return any(
+            eku in eku_values
+            for eku in ("1.3.6.1.4.1.311.20.2.1", "2.5.29.37.0")
+        )
+
+    def _template_allows_on_behalf_of(self, entity: dict[str, Any]) -> bool:
+        schema_version = self._property_number(entity, "schemaversion", "SchemaVersion")
+        authorized_signatures = self._property_number(
+            entity,
+            "authorizedsignatures",
+            "AuthorizedSignatures",
+        )
+
+        if schema_version is not None and schema_version <= 1:
+            return True
+        return (authorized_signatures or 0) > 0
+
+    def _normalize_template_reference(self, value: Any) -> str:
+        if isinstance(value, dict):
+            candidate = self._extract_identifier(value) or value.get("Name") or value.get("name")
+        else:
+            candidate = value
+
+        return str(candidate or "").strip().casefold()
+
+    def _resolve_published_template_ids(self, data: dict[str, list[dict[str, Any]]]) -> set[str]:
+        reference_sets: set[str] = set()
+        for ca in data.get("enterprisecas", []):
+            if not isinstance(ca, dict):
+                continue
+
+            for key in (
+                "EnabledCertTemplates",
+                "enabledcerttemplates",
+                "PublishedTemplates",
+                "publishedtemplates",
+                "CertificateTemplates",
+                "certificatetemplates",
+                "Templates",
+                "templates",
+            ):
+                for value in self._property_list(ca, key):
+                    normalized = self._normalize_template_reference(value)
+                    if normalized:
+                        reference_sets.add(normalized)
+
+                raw_value = self._property_lookup(ca, key)
+                if isinstance(raw_value, list):
+                    for item in raw_value:
+                        normalized = self._normalize_template_reference(item)
+                        if normalized:
+                            reference_sets.add(normalized)
+
+        if not reference_sets:
+            return set()
+
+        published: set[str] = set()
+        for template in data.get("certtemplates", []):
+            if not isinstance(template, dict):
+                continue
+
+            template_id = self._entity_id(template)
+            template_name = self._entity_name(template)
+            if not template_id:
+                continue
+
+            candidates = {
+                str(template_id).casefold(),
+                str(template_name or "").casefold(),
+            }
+            if candidates & reference_sets:
+                published.add(str(template_id))
+
+        return published
+
+    def _attach_enroll_on_behalf_of_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
+        published_template_ids = self._resolve_published_template_ids(data)
+        templates = [
+            entity
+            for entity in data.get("certtemplates", [])
+            if isinstance(entity, dict)
+        ]
+
+        for source_template in templates:
+            source_id = self._entity_id(source_template)
+            if not source_id or source_id not in self.graph:
+                continue
+            if published_template_ids and source_id not in published_template_ids:
+                continue
+            if not self._is_enrollment_agent_template(source_template):
+                continue
+
+            for target_template in templates:
+                target_id = self._entity_id(target_template)
+                if not target_id or target_id not in self.graph or target_id == source_id:
+                    continue
+                if published_template_ids and target_id not in published_template_ids:
+                    continue
+                if not self._template_allows_on_behalf_of(target_template):
+                    continue
+
+                self.add_edge_from_ace(source_id, target_id, "EnrollOnBehalfOf")
 
     def _attach_contains_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
         for dataset in ("domains", "ous", "containers", "computers"):
@@ -570,6 +737,7 @@ class NanoGraphEngine:
         self._attach_contains_edges(data)
         self._attach_cross_forest_trust_edges(data)
         self._attach_dcfor_edges(data)
+        self._attach_enroll_on_behalf_of_edges(data)
 
     def _normalize_object_name(self, name: str) -> str:
         r"""Extract the clean RDN (relative distinguished name) from an AD object name.

