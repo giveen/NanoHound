@@ -30,7 +30,7 @@ ingestor = SharpHoundIngestor()
 graph_engine = NanoGraphEngine()
 loot_manager = LootManager()
 notes_store = NotesStore()
-command_oracle = CommandOracle(loot_manager)
+command_oracle = CommandOracle(loot_manager, graph_engine)
 
 
 def _empty_loaded_data() -> dict[str, list[dict]]:

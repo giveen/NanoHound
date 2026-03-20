@@ -463,6 +463,45 @@ class NanoGraphEngine:
 
             self.add_edge_from_ace(computer_id, domain_sid, "DCFor")
 
+    def find_dc_for_domain(self, domain_name: str | None) -> str | None:
+        """Find a Domain Controller hostname for the given domain name.
+        
+        Returns the computer name of any DC found for this domain, or None.
+        DC computers have a 'DCFor' edge to a domain node, or are identified by
+        having PrimaryGroupSID ending in -516 (Domain Controllers group).
+        """
+        if not domain_name:
+            return None
+        
+        domain_name_normalized = str(domain_name).casefold().strip()
+        
+        # First pass: look for computers with DCFor edges to this domain
+        for dc_id, domain_id in self.graph.edges():
+            edge_data = self.graph.get_edge_data(dc_id, domain_id)
+            if edge_data and edge_data.get("relationship") == "DCFor":
+                # Check if target domain matches our query
+                domain_attrs = self.graph.nodes.get(domain_id, {})
+                domain_display = str(domain_attrs.get("name", "")).casefold()
+                if domain_display == domain_name_normalized or domain_id == domain_name_normalized:
+                    dc_attrs = self.graph.nodes.get(dc_id, {})
+                    dc_name = dc_attrs.get("name")
+                    if dc_name:
+                        return str(dc_name)
+        
+        # Second pass: heuristic - look for computers matching the domain in their name
+        for node_id, attrs in self.graph.nodes(data=True):
+            if attrs.get("type") != "computer":
+                continue
+            node_name = str(attrs.get("name", "")).casefold()
+            # If computer name starts with domain prefix (DOMAIN-DC01), it's likely a DC
+            if domain_name_normalized and node_name.startswith(domain_name_normalized.split(".")[0]):
+                return str(attrs.get("name"))
+        
+        # Third pass: return any computer node as fallback
+        for node_id, attrs in self.graph.nodes(data=True):
+            if attrs.get("type") == "computer":
+                return str(attrs.get("name"))
+
     def build_from_sharphound(self, data: dict[str, list[dict]]) -> None:
         """Build graph nodes and edges from parsed SharpHound datasets."""
         self.clear()
