@@ -484,6 +484,7 @@ class NanoGraphEngine:
                 node_attrs: dict[str, Any] = {
                     "type": self.DATASET_NODE_TYPE_MAP.get(dataset, dataset.rstrip("s")),
                     "name": self._entity_name(entity) or entity_id,
+                    "raw_properties": entity.get("Properties") or {},
                 }
 
                 if dataset == "users":
