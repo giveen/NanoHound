@@ -1264,7 +1264,7 @@ def build_ui() -> None:
                     "ForceChangePassword", "AddSelf", "CanAddMember", "AddMember",
                     "AddMembers", "AddAllowedToAct", "AllowedToAct", "AllowedToDelegate",
                     "DCSync", "DumpSMSAPassword", "DelegatedEnrollmentAgent", "Enroll",
-                    "EnrollOnBehalfOf",
+                    "EnrollOnBehalfOf", "ExecuteDCOM", "EnterpriseCAFor", "ExtendedByPolicy",
                     "ADCSESC1", "ADCSESC3", "ADCSESC4", "ADCSESC6a", "ADCSESC6b",
                     "ADCSESC9a", "ADCSESC9b", "ADCSESC10a", "ADCSESC10b", "ADCSESC13",
                     "CoerceAndRelayNTLMToADCS", "CoerceAndRelayNTLMToLDAP",

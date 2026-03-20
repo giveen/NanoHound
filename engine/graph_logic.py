@@ -27,7 +27,10 @@ class NanoGraphEngine:
         "DumpSmsaPassword": "DumpSMSAPassword",
         "Enroll": "Enroll",
         "Certificate-Enrollment": "Enroll",
+        "EnterpriseCAFor": "EnterpriseCAFor",
         "EnrollOnBehalfOf": "EnrollOnBehalfOf",
+        "ExecuteDCOM": "ExecuteDCOM",
+        "ExtendedByPolicy": "ExtendedByPolicy",
         "GenericAll": "Owns",
         "WriteDacl": "CanWriteDacl",
         "WriteOwner": "CanWriteOwner",
@@ -80,7 +83,10 @@ class NanoGraphEngine:
         "DelegatedEnrollmentAgent": 3,
         "DumpSMSAPassword": 2,
         "Enroll": 2,
+        "EnterpriseCAFor": 3,
         "EnrollOnBehalfOf": 2,
+        "ExecuteDCOM": 1,
+        "ExtendedByPolicy": 3,
         "GenericAll": 1,
         "Owns": 1,
         "WriteDacl": 2,
@@ -144,6 +150,7 @@ class NanoGraphEngine:
         "AddKeyCredentialLink",
         "AdminTo",
         "CanRDP",
+        "ExecuteDCOM",
         "ClaimSpecialIdentity",
         "CoerceAndRelayNTLMToADCS",
         "CoerceAndRelayNTLMToLDAP",
@@ -160,6 +167,7 @@ class NanoGraphEngine:
         "CanAddMember",
         "AllExtendedRights",
         "Enroll",
+        "EnterpriseCAFor",
         "ADCSESC1",
         "ADCSESC3",
         "ADCSESC4",
@@ -174,6 +182,7 @@ class NanoGraphEngine:
         "ADCSESC10a",
         "ADCSESC10b",
         "ADCSESC13",
+        "ExtendedByPolicy",
         "EnrollOnBehalfOf",
         "DumpSMSAPassword",
         "DelegatedEnrollmentAgent",
@@ -395,6 +404,12 @@ class NanoGraphEngine:
                 return None
         return None
 
+    def _property_string(self, entity: dict[str, Any], *names: str) -> str:
+        value = self._property_lookup(entity, *names)
+        if value is None:
+            return ""
+        return str(value).strip()
+
     def _is_enrollment_agent_template(self, entity: dict[str, Any]) -> bool:
         eku_values = {
             value.casefold()
@@ -482,6 +497,84 @@ class NanoGraphEngine:
                 published.add(str(template_id))
 
         return published
+
+    def _attach_enterprise_ca_for_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
+        cert_thumbprints: dict[str, list[str]] = {}
+
+        for dataset in ("rootcas", "aiacas"):
+            for entity in data.get(dataset, []):
+                if not isinstance(entity, dict):
+                    continue
+                entity_id = self._entity_id(entity)
+                thumbprint = self._property_string(entity, "certthumbprint", "CertThumbprint")
+                if not entity_id or not thumbprint:
+                    continue
+                cert_thumbprints.setdefault(thumbprint.casefold(), []).append(entity_id)
+
+        if not cert_thumbprints:
+            return
+
+        for enterprise_ca in data.get("enterprisecas", []):
+            if not isinstance(enterprise_ca, dict):
+                continue
+            enterprise_ca_id = self._entity_id(enterprise_ca)
+            thumbprint = self._property_string(enterprise_ca, "certthumbprint", "CertThumbprint")
+            if not enterprise_ca_id or not thumbprint:
+                continue
+
+            for target_id in cert_thumbprints.get(thumbprint.casefold(), []):
+                if target_id in self.graph:
+                    self.add_edge_from_ace(enterprise_ca_id, target_id, "EnterpriseCAFor")
+
+    def _attach_extended_by_policy_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
+        policy_lookup: dict[str, list[tuple[str, str]]] = {}
+
+        for issuance_policy in data.get("issuancepolicies", []):
+            if not isinstance(issuance_policy, dict):
+                continue
+
+            policy_id = self._entity_id(issuance_policy)
+            policy_oid = self._property_string(
+                issuance_policy,
+                "certtemplateoid",
+                "CertTemplateOID",
+            )
+            policy_domain_sid = self._property_string(
+                issuance_policy,
+                "domainsid",
+                "DomainSID",
+            )
+            if not policy_id or not policy_oid:
+                continue
+
+            policy_lookup.setdefault(policy_oid.casefold(), []).append((policy_id, policy_domain_sid.casefold()))
+
+        if not policy_lookup:
+            return
+
+        for cert_template in data.get("certtemplates", []):
+            if not isinstance(cert_template, dict):
+                continue
+
+            cert_template_id = self._entity_id(cert_template)
+            cert_template_domain_sid = self._property_string(
+                cert_template,
+                "domainsid",
+                "DomainSID",
+            ).casefold()
+            if not cert_template_id:
+                continue
+
+            for policy_oid in self._property_list(
+                cert_template,
+                "certificatepolicy",
+                "CertificatePolicy",
+            ):
+                for policy_id, policy_domain_sid in policy_lookup.get(policy_oid.casefold(), []):
+                    if cert_template_domain_sid and policy_domain_sid and cert_template_domain_sid != policy_domain_sid:
+                        continue
+                    if policy_id in self.graph:
+                        self.add_edge_from_ace(cert_template_id, policy_id, "ExtendedByPolicy")
 
     def _attach_enroll_on_behalf_of_edges(self, data: dict[str, list[dict[str, Any]]]) -> None:
         published_template_ids = self._resolve_published_template_ids(data)
@@ -737,6 +830,8 @@ class NanoGraphEngine:
         self._attach_contains_edges(data)
         self._attach_cross_forest_trust_edges(data)
         self._attach_dcfor_edges(data)
+        self._attach_enterprise_ca_for_edges(data)
+        self._attach_extended_by_policy_edges(data)
         self._attach_enroll_on_behalf_of_edges(data)
 
     def _normalize_object_name(self, name: str) -> str:
