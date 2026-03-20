@@ -41,6 +41,26 @@ class LootManager:
     def _normalize(self, value: str) -> str:
         return value.strip().casefold()
 
+    def _normalize_principal(self, identity: str) -> set[str]:
+        """Generate all normalized forms of a principal (SID, DOMAIN\\USER, USER@DOMAIN, etc.)."""
+        normalized = self._normalize(identity)
+        variants = {normalized}
+        
+        # Handle DOMAIN\USER format
+        if "\\" in identity:
+            domain, user = identity.split("\\", maxsplit=1)
+            variants.add(self._normalize(user))
+            variants.add(self._normalize(f"{domain}\\{user}"))
+        
+        # Handle USER@DOMAIN format -> convert to DOMAIN\USER
+        if "@" in identity and "\\" not in identity:
+            user, domain = identity.split("@", maxsplit=1)
+            variants.add(self._normalize(user))
+            variants.add(self._normalize(f"{domain}\\{user}"))
+            variants.add(normalized)  # Keep original @ format too
+        
+        return variants
+
     def clear(self) -> None:
         """Remove all credential entries from the in-memory store."""
         self._records.clear()
@@ -77,19 +97,27 @@ class LootManager:
         return record
 
     def get_credential(self, identity: str) -> CredentialRecord | None:
-        """Retrieve credential material by SID, username, or DOMAIN\\username."""
+        """Retrieve credential material by SID, username, or DOMAIN\\username or USER@DOMAIN."""
         if not identity:
             return None
 
-        key = self._normalize(identity)
-        if key in self._records:
-            return self._records[key]
+        # Get all normalized variants of the search identity
+        search_variants = self._normalize_principal(identity)
+        
+        # Check if any variant matches a stored record key
+        for variant in search_variants:
+            if variant in self._records:
+                return self._records[variant]
 
+        # Check if any variant matches parts of stored records
         for record in self._records.values():
             username = record.username.casefold()
             principal = record.principal.casefold()
             domain_user = f"{record.domain}\\{record.username}".casefold().strip("\\")
-            if key in {username, principal, domain_user}:
+            record_variants = {username, principal, domain_user}
+            
+            # Check for any overlap between search variants and record variants
+            if search_variants & record_variants:
                 return record
 
         return None
