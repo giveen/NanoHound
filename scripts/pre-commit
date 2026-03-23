@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Simple pre-commit hook: run pytest and abort commit on failures.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+export PYTHONPATH=.
+echo "Running tests before commit..."
+./.venv/bin/pytest -q || {
+  echo "Tests failed — aborting commit." >&2
+  exit 1
+}
+echo "Tests passed. Proceeding with commit."
+exit 0
